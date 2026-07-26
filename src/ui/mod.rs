@@ -38,6 +38,12 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_status(f, status, app);
 
+    // Nothing useful can be rendered until the board arrives, so explain the
+    // wait rather than showing an empty dashboard.
+    if app.quotes.is_empty() && !app.show_help {
+        draw_startup(f, app);
+    }
+
     if app.show_help {
         draw_help(f);
     }
@@ -140,8 +146,36 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(app.status.clone(), theme::label_style()));
     }
 
-    if app.inflight > 0 {
-        spans.push(Span::styled(" ●", Style::new().fg(theme::WARN)));
+    // Name the work in flight rather than showing an anonymous busy dot: when
+    // a load is slow, "what is it waiting on" is the only useful information.
+    if !app.activities.is_empty() {
+        spans.push(Span::styled(
+            format!("  {} ", app.spinner_glyph()),
+            Style::new().fg(theme::WARN),
+        ));
+        spans.push(Span::styled(
+            app.activities.join(" · "),
+            Style::new().fg(theme::WARN),
+        ));
+    }
+
+    if let Some(b) = &app.backfill {
+        spans.push(Span::styled(" │ ", theme::border_style()));
+        spans.push(Span::styled("backfill ", theme::label_style()));
+        spans.push(Span::styled(
+            widgets::bar(b.ratio(), 12),
+            Style::new().fg(theme::ACCENT),
+        ));
+        spans.push(Span::styled(
+            format!(" {}/{} {}", b.done, b.total, b.day),
+            theme::label_style(),
+        ));
+        if let Some(rows) = b.rows {
+            spans.push(Span::styled(
+                format!(" ({rows} symbols)"),
+                Style::new().fg(theme::DIM),
+            ));
+        }
     }
 
     let left = Paragraph::new(Line::from(spans));
@@ -153,6 +187,118 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
 
     f.render_widget(left, area);
     f.render_widget(right, area);
+}
+
+/// First-run overlay.
+///
+/// With an empty cache there is genuinely nothing to render for a minute or
+/// so, and a blank dashboard reads as a hang. This spells out each step, what
+/// it is for, and what has already completed.
+fn draw_startup(f: &mut Frame, app: &App) {
+    let area = widgets::centered_rect(58, 46, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .border_style(Style::new().fg(theme::ACCENT))
+        .title(Span::styled(" Connecting to PSX ", theme::title_style()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+
+    let step = |done: bool, active: bool, label: &str, detail: &str| {
+        let (mark, style) = if done {
+            ("✓", Style::new().fg(theme::UP))
+        } else if active {
+            ("→", Style::new().fg(theme::WARN))
+        } else {
+            ("·", Style::new().fg(theme::DIM))
+        };
+        Line::from(vec![
+            Span::styled(format!("  {mark} "), style),
+            Span::styled(
+                format!("{label:<18}"),
+                if done || active {
+                    theme::value_style()
+                } else {
+                    theme::label_style()
+                },
+            ),
+            Span::styled(detail.to_string(), Style::new().fg(theme::DIM)),
+        ])
+    };
+
+    let waiting_on = |needle: &str| app.activities.iter().any(|a| a.contains(needle));
+
+    let mut lines = vec![
+        Line::raw(""),
+        step(
+            !app.symbols.is_empty(),
+            waiting_on("symbol list"),
+            "Symbol list",
+            "every listed instrument",
+        ),
+        step(
+            !app.quotes.is_empty(),
+            waiting_on("market board"),
+            "Market board",
+            "live prices for the session",
+        ),
+        step(
+            !app.indices.is_empty(),
+            waiting_on("indices"),
+            "Indices",
+            "KSE100 and sector indices",
+        ),
+        step(
+            !app.benchmark.is_empty(),
+            waiting_on("KSE100"),
+            "Benchmark history",
+            "for beta and correlation",
+        ),
+        Line::raw(""),
+    ];
+
+    if let Some(b) = &app.backfill {
+        lines.push(Line::from(vec![
+            Span::styled("  → ", Style::new().fg(theme::WARN)),
+            Span::styled(format!("{:<18}", "OHLC backfill"), theme::value_style()),
+            Span::styled(
+                format!("{}/{} sessions", b.done, b.total),
+                Style::new().fg(theme::DIM),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("      "),
+            Span::styled(widgets::bar(b.ratio(), 28), Style::new().fg(theme::ACCENT)),
+            Span::styled(format!(" {}", b.day), Style::new().fg(theme::DIM)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "      true daily high/low — one request per session",
+            Style::new().fg(theme::DIM),
+        )));
+        lines.push(Line::raw(""));
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  {} ", app.spinner_glyph()),
+            Style::new().fg(theme::WARN),
+        ),
+        Span::styled(app.status.clone(), theme::label_style()),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  Requests are paced to stay gentle on PSX. This runs",
+        Style::new().fg(theme::DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  once — later launches open straight from the cache.",
+        Style::new().fg(theme::DIM),
+    )));
+
+    f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 fn draw_help(f: &mut Frame) {

@@ -61,8 +61,37 @@ pub enum DataEvent {
     Company(Box<Company>),
     Status(String),
     Error(String),
-    /// A unit of background work finished (used to drive the busy indicator).
-    Done,
+    /// A named unit of background work started — shown live in the status bar
+    /// so the user can see *what* is loading, not merely that something is.
+    Begin(String),
+    /// That unit finished. Carries the same label so concurrent work (an
+    /// interactive load racing the backfill) unwinds in any order.
+    End(String),
+    /// Backfill advanced. Reported separately from [`DataEvent::Begin`] because
+    /// it is long-running and deserves a progress bar rather than a spinner.
+    Backfill(BackfillProgress),
+    /// Backfill finished, or had nothing to do.
+    BackfillDone,
+}
+
+/// How far the whole-market OHLC backfill has got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillProgress {
+    pub done: usize,
+    pub total: usize,
+    /// The trading day currently being ingested.
+    pub day: String,
+    /// Symbols written for that day; `None` marks a market holiday.
+    pub rows: Option<usize>,
+}
+
+impl BackfillProgress {
+    pub fn ratio(&self) -> f64 {
+        if self.total == 0 {
+            return 1.0;
+        }
+        (self.done as f64 / self.total as f64).clamp(0.0, 1.0)
+    }
 }
 
 // --- screens -------------------------------------------------------------
@@ -316,8 +345,13 @@ pub struct App {
     pub show_help: bool,
     pub status: String,
     pub error: Option<String>,
-    /// Outstanding background requests, for the activity indicator.
-    pub inflight: usize,
+    /// Labels of the background work currently in flight, oldest first, so the
+    /// status bar can name what it is waiting on.
+    pub activities: Vec<String>,
+    /// Progress of the long-running OHLC backfill, if it is running.
+    pub backfill: Option<BackfillProgress>,
+    /// Animation frame for the busy spinner.
+    pub spinner: usize,
     /// When each symbol last went to the network, so revisits are served from
     /// the cache instead of refetching.
     refreshed: HashMap<String, Instant>,
@@ -348,14 +382,31 @@ impl App {
             show_help: false,
             status: "Loading market data…".into(),
             error: None,
-            inflight: 0,
+            activities: Vec::new(),
+            backfill: None,
+            spinner: 0,
             refreshed: HashMap::new(),
         }
     }
 
     pub fn request(&mut self, req: DataRequest) {
-        self.inflight += 1;
         let _ = self.tx.send(req);
+    }
+
+    /// Whether anything is loading right now.
+    pub fn is_busy(&self) -> bool {
+        !self.activities.is_empty() || self.backfill.is_some()
+    }
+
+    /// The current spinner glyph.
+    pub fn spinner_glyph(&self) -> char {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        FRAMES[self.spinner % FRAMES.len()]
+    }
+
+    /// Advance the spinner. Called on a timer while work is in flight.
+    pub fn tick(&mut self) {
+        self.spinner = self.spinner.wrapping_add(1);
     }
 
     // --- data events -----------------------------------------------------
@@ -404,7 +455,17 @@ impl App {
             }
             DataEvent::Status(s) => self.status = s,
             DataEvent::Error(e) => self.error = Some(e),
-            DataEvent::Done => self.inflight = self.inflight.saturating_sub(1),
+            DataEvent::Begin(label) => self.activities.push(label),
+            DataEvent::End(label) => {
+                // Remove one matching entry: the same label can legitimately be
+                // in flight twice (a re-selected symbol), and dropping all of
+                // them would clear the indicator while work is still running.
+                if let Some(i) = self.activities.iter().position(|a| *a == label) {
+                    self.activities.remove(i);
+                }
+            }
+            DataEvent::Backfill(p) => self.backfill = Some(p),
+            DataEvent::BackfillDone => self.backfill = None,
         }
     }
 
@@ -1202,6 +1263,93 @@ mod tests {
         assert_eq!(a.screener.cursor, 0);
         a.on_key(key('k'));
         assert_eq!(a.screener.cursor, 0);
+    }
+
+    #[test]
+    fn activities_are_named_and_cleared_in_any_order() {
+        let mut a = app();
+        assert!(!a.is_busy());
+
+        a.on_event(DataEvent::Begin("HBL history".into()));
+        a.on_event(DataEvent::Begin("market board".into()));
+        assert!(a.is_busy());
+        assert_eq!(a.activities, vec!["HBL history", "market board"]);
+
+        // Concurrent work can finish out of order.
+        a.on_event(DataEvent::End("market board".into()));
+        assert_eq!(a.activities, vec!["HBL history"]);
+
+        a.on_event(DataEvent::End("HBL history".into()));
+        assert!(!a.is_busy());
+    }
+
+    #[test]
+    fn duplicate_activity_labels_unwind_one_at_a_time() {
+        // Re-selecting a symbol can put the same label in flight twice;
+        // clearing all of them would hide work that is still running.
+        let mut a = app();
+        a.on_event(DataEvent::Begin("HBL history".into()));
+        a.on_event(DataEvent::Begin("HBL history".into()));
+
+        a.on_event(DataEvent::End("HBL history".into()));
+        assert_eq!(a.activities.len(), 1, "one End must clear only one Begin");
+        assert!(a.is_busy());
+
+        a.on_event(DataEvent::End("HBL history".into()));
+        assert!(!a.is_busy());
+    }
+
+    #[test]
+    fn an_unmatched_end_does_not_underflow() {
+        let mut a = app();
+        a.on_event(DataEvent::End("never started".into()));
+        assert!(a.activities.is_empty());
+        assert!(!a.is_busy());
+    }
+
+    #[test]
+    fn backfill_progress_is_tracked_and_cleared() {
+        let mut a = app();
+        a.on_event(DataEvent::Backfill(BackfillProgress {
+            done: 12,
+            total: 48,
+            day: "2026-05-06".into(),
+            rows: Some(629),
+        }));
+        let b = a.backfill.as_ref().unwrap();
+        assert_eq!(b.done, 12);
+        assert!((b.ratio() - 0.25).abs() < 1e-9);
+        assert!(a.is_busy(), "a running backfill counts as busy");
+
+        a.on_event(DataEvent::BackfillDone);
+        assert!(a.backfill.is_none());
+        assert!(!a.is_busy());
+    }
+
+    #[test]
+    fn backfill_ratio_is_bounded_and_safe_when_empty() {
+        let p = |done, total| BackfillProgress {
+            done,
+            total,
+            day: "2026-01-01".into(),
+            rows: None,
+        };
+        assert_eq!(p(0, 0).ratio(), 1.0, "no work to do reads as complete");
+        assert_eq!(p(0, 10).ratio(), 0.0);
+        assert_eq!(p(99, 10).ratio(), 1.0, "must clamp, never exceed 1.0");
+    }
+
+    #[test]
+    fn spinner_advances_and_wraps_without_overflow() {
+        let mut a = app();
+        let first = a.spinner_glyph();
+        a.tick();
+        assert_ne!(a.spinner_glyph(), first, "the spinner must animate");
+
+        // Must not panic after a long-running session.
+        a.spinner = usize::MAX;
+        a.tick();
+        assert!(a.spinner_glyph().is_alphanumeric() || !a.spinner_glyph().is_control());
     }
 
     #[test]

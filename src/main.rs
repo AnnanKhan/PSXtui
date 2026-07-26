@@ -16,6 +16,9 @@ use psxtui::ui;
 /// How often the market board is refreshed while the app is open.
 const AUTO_REFRESH: Duration = Duration::from_secs(60);
 
+/// Busy-spinner frame rate.
+const SPINNER_TICK: Duration = Duration::from_millis(110);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let store = Arc::new(Store::open_default().context("opening local cache")?);
@@ -49,6 +52,10 @@ async fn run(
     // The first tick fires immediately; the startup refresh already covers it.
     refresh.tick().await;
 
+    // Drives the busy spinner. Ticks continuously but only forces a redraw
+    // while work is in flight, so an idle app costs nothing.
+    let mut spinner = tokio::time::interval(SPINNER_TICK);
+
     terminal.draw(|f| ui::draw(f, app))?;
 
     loop {
@@ -70,6 +77,12 @@ async fn run(
             }
             _ = refresh.tick() => {
                 app.request(DataRequest::RefreshMarket);
+            }
+            _ = spinner.tick() => {
+                if !app.is_busy() {
+                    continue;
+                }
+                app.tick();
             }
         }
 

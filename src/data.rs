@@ -10,7 +10,7 @@ use std::sync::Arc;
 use chrono::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::app::{BENCHMARK, DataEvent, DataRequest};
+use crate::app::{BENCHMARK, BackfillProgress, DataEvent, DataRequest};
 use crate::cache::Store;
 use crate::psx::{self, PsxClient};
 
@@ -50,6 +50,18 @@ impl Worker {
         self.emit(DataEvent::Error(format!("{context}: {e}")));
     }
 
+    /// Run `f` while `label` is displayed as in-flight work.
+    ///
+    /// Every network step is wrapped so the status bar can name what it is
+    /// waiting on. The guard pairs Begin with End on every path, including
+    /// failures, so a failed fetch can't strand the indicator.
+    async fn tracked<T>(&self, label: &str, f: impl Future<Output = T>) -> T {
+        self.emit(DataEvent::Begin(label.to_string()));
+        let out = f.await;
+        self.emit(DataEvent::End(label.to_string()));
+        out
+    }
+
     /// Serve cached state immediately so the first frame is never empty.
     pub fn prime_from_cache(&self) {
         if let Ok(syms) = self.store.symbols()
@@ -87,41 +99,49 @@ impl Worker {
                 DataRequest::LoadSymbol(sym) => self.load_symbol(&sym).await,
                 DataRequest::LoadCompany(sym) => self.load_company(&sym).await,
                 DataRequest::Backfill(days) => {
-                    // Hand off rather than block this queue. The spawned task
-                    // signals its own completion, so don't double-count it.
+                    // Hand off rather than block this queue.
                     tokio::spawn(self.clone().run_backfill(days));
-                    continue;
                 }
             }
-            self.emit(DataEvent::Done);
         }
     }
 
     /// Run the OHLC backfill on a dedicated task.
     pub async fn run_backfill(self, days: i64) {
         self.backfill(days).await;
-        self.emit(DataEvent::Done);
+        self.emit(DataEvent::BackfillDone);
     }
 
     async fn refresh_market(&self) {
-        match psx::symbols(&self.client).await {
+        match self
+            .tracked("symbol list", psx::symbols(&self.client))
+            .await
+        {
             Ok(syms) => {
+                self.status(format!("Loaded {} listed instruments", syms.len()));
                 let _ = self.store.put_symbols(&syms);
                 self.emit(DataEvent::Symbols(syms));
             }
             Err(e) => self.fail("symbol list", e),
         }
 
-        match psx::market_watch(&self.client).await {
+        match self
+            .tracked("market board", psx::market_watch(&self.client))
+            .await
+        {
             Ok(quotes) => {
+                self.status(format!("Quoted {} symbols", quotes.len()));
                 let _ = self.store.put_quotes(&quotes);
                 self.emit(DataEvent::Quotes(quotes));
             }
             Err(e) => self.fail("market watch", e),
         }
 
-        match psx::indices(&self.client).await {
-            Ok(idx) => self.emit(DataEvent::Indices(idx)),
+        match self.tracked("indices", psx::indices(&self.client)).await {
+            Ok(idx) => {
+                self.status(format!("Loaded {} indices", idx.len()));
+                self.emit(DataEvent::Indices(idx));
+            }
             Err(e) => self.fail("indices", e),
         }
 
@@ -142,11 +162,20 @@ impl Worker {
 
         self.load_series(symbol).await;
 
-        match psx::intraday(&self.client, symbol).await {
-            Ok(ticks) => self.emit(DataEvent::Ticks {
-                symbol: symbol.into(),
-                ticks,
-            }),
+        match self
+            .tracked(
+                &format!("{symbol} intraday"),
+                psx::intraday(&self.client, symbol),
+            )
+            .await
+        {
+            Ok(ticks) => {
+                self.status(format!("{symbol}: {} trades today", ticks.len()));
+                self.emit(DataEvent::Ticks {
+                    symbol: symbol.into(),
+                    ticks,
+                });
+            }
             Err(e) => self.fail(&format!("{symbol} intraday"), e),
         }
     }
@@ -154,8 +183,12 @@ impl Worker {
     /// Fetch daily history, merge it into the cache, and emit the merged
     /// result — which may carry true high/low from earlier backfills.
     async fn load_series(&self, symbol: &str) {
-        match psx::eod(&self.client, symbol).await {
+        match self
+            .tracked(&format!("{symbol} history"), psx::eod(&self.client, symbol))
+            .await
+        {
             Ok(bars) => {
+                self.status(format!("{symbol}: {} daily bars", bars.len()));
                 let _ = self.store.put_eod_bars(symbol, &bars);
                 let merged = self.store.bars(symbol, None).unwrap_or(bars);
                 self.emit(DataEvent::Bars {
@@ -172,8 +205,18 @@ impl Worker {
             self.emit(DataEvent::Company(Box::new(c)));
             return;
         }
-        match psx::company(&self.client, symbol).await {
+        match self
+            .tracked(
+                &format!("{symbol} profile"),
+                psx::company(&self.client, symbol),
+            )
+            .await
+        {
             Ok(c) => {
+                self.status(format!(
+                    "{symbol}: profile, {} filings",
+                    c.announcements.len()
+                ));
                 let _ = self.store.put_company(&c);
                 self.emit(DataEvent::Company(Box::new(c)));
             }
@@ -197,19 +240,35 @@ impl Worker {
 
         let total = missing.len();
         for (i, day) in missing.iter().enumerate() {
+            // Announce the day *before* fetching it, so the bar reflects what
+            // is happening now rather than what already finished.
+            self.emit(DataEvent::Backfill(BackfillProgress {
+                done: i,
+                total,
+                day: day.clone(),
+                rows: None,
+            }));
+
             match psx::historical(&self.client, day).await {
                 Ok(rows) if rows.is_empty() => {
                     // A holiday: record it so it is never refetched.
                     let _ = self.store.mark_historical_empty(day);
+                    self.emit(DataEvent::Backfill(BackfillProgress {
+                        done: i + 1,
+                        total,
+                        day: day.clone(),
+                        rows: None,
+                    }));
                 }
                 Ok(rows) => {
+                    let n = rows.len();
                     let _ = self.store.put_historical(day, &rows);
-                    self.status(format!(
-                        "Backfilling OHLC {}/{} — {day} ({} symbols)",
-                        i + 1,
+                    self.emit(DataEvent::Backfill(BackfillProgress {
+                        done: i + 1,
                         total,
-                        rows.len()
-                    ));
+                        day: day.clone(),
+                        rows: Some(n),
+                    }));
                 }
                 Err(e) => {
                     self.fail(&format!("backfill {day}"), e);
@@ -221,6 +280,8 @@ impl Worker {
         }
 
         let count = self.store.bar_count().unwrap_or(0);
-        self.status(format!("Backfill complete — {count} daily bars cached"));
+        self.status(format!(
+            "Backfill complete — {count} daily bars across {total} sessions cached"
+        ));
     }
 }

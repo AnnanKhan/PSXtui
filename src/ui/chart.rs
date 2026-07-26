@@ -34,10 +34,23 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         let inner = block.inner(main);
         f.render_widget(block, main);
         if inner.height > 0 {
-            f.render_widget(
-                Paragraph::new(widgets::placeholder("Loading price history…")),
-                inner,
-            );
+            // Distinguish "still fetching" from "PSX has nothing" — otherwise
+            // an untraded scrip looks identical to a hung request.
+            let msg = if app.selected.is_empty() {
+                "Select a symbol to chart it".to_string()
+            } else if app.is_busy() {
+                format!(
+                    "{} Fetching {} daily history from PSX…",
+                    app.spinner_glyph(),
+                    app.selected
+                )
+            } else {
+                format!("No price history published for {}", app.selected)
+            };
+            let pad = (inner.height.saturating_sub(1) / 2) as usize;
+            let mut lines: Vec<Line> = vec![Line::raw(""); pad];
+            lines.push(widgets::placeholder(&msg));
+            f.render_widget(Paragraph::new(Text::from(lines)), inner);
         }
         return;
     }

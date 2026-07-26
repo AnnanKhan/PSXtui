@@ -5,8 +5,9 @@
 //! post [`DataRequest`]s to a background worker and receive [`DataEvent`]s
 //! back, so the interface stays responsive while PSX is slow.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::UnboundedSender;
@@ -16,6 +17,17 @@ use crate::model::{Bar, Company, Index, Quote, SymbolInfo, Tick};
 
 /// The benchmark every risk statistic is measured against.
 pub const BENCHMARK: &str = "KSE100";
+
+/// How long a symbol's live data stays fresh before revisiting the network.
+///
+/// Revisiting a symbol within this window is served entirely from the local
+/// cache — matching the market board's own refresh cadence, so nothing on
+/// screen is more stale than the quotes beside it.
+const SYMBOL_TTL: Duration = Duration::from_secs(60);
+
+/// How long a cached company profile is reused. Filings land a few times a
+/// quarter, so a day is generous.
+const COMPANY_TTL_DAYS: i64 = 1;
 
 // --- messages ------------------------------------------------------------
 
@@ -306,6 +318,9 @@ pub struct App {
     pub error: Option<String>,
     /// Outstanding background requests, for the activity indicator.
     pub inflight: usize,
+    /// When each symbol last went to the network, so revisits are served from
+    /// the cache instead of refetching.
+    refreshed: HashMap<String, Instant>,
 }
 
 impl App {
@@ -334,6 +349,7 @@ impl App {
             status: "Loading market data…".into(),
             error: None,
             inflight: 0,
+            refreshed: HashMap::new(),
         }
     }
 
@@ -414,13 +430,48 @@ impl App {
             return;
         }
         self.selected = symbol.clone();
-        // Clear stale series so a slow fetch never renders under a new ticker.
-        self.bars.clear();
+        // Intraday ticks aren't persisted, so they always start empty.
         self.ticks.clear();
-        self.company = None;
         self.announcement_cursor = 0;
-        self.request(DataRequest::LoadSymbol(symbol.clone()));
-        self.request(DataRequest::LoadCompany(symbol));
+
+        // Paint from the local cache synchronously.
+        //
+        // The worker also reads the cache, but it does so at the back of a
+        // serial queue — behind the OHLC backfill and any in-flight market
+        // refresh, each spaced by the rate limiter. Waiting for that turned
+        // revisiting a symbol into a fresh "Loading…" every time, even though
+        // the data was already on disk. A local SQLite read is sub-millisecond,
+        // so doing it here is safe on the render path and makes revisits
+        // instant.
+        self.bars = self.store.bars(&symbol, None).unwrap_or_default();
+        self.company = self
+            .store
+            .company(&symbol, chrono::Duration::days(COMPANY_TTL_DAYS))
+            .ok()
+            .flatten();
+
+        // Only go back to the network once the cached copy has aged out.
+        if self.is_stale(&symbol) {
+            self.refreshed.insert(symbol.clone(), Instant::now());
+            self.request(DataRequest::LoadSymbol(symbol.clone()));
+            if self.company.is_none() {
+                self.request(DataRequest::LoadCompany(symbol));
+            }
+        } else {
+            self.status = format!("{symbol} — from cache");
+        }
+    }
+
+    /// Whether `symbol`'s live data is due a network refresh.
+    fn is_stale(&self, symbol: &str) -> bool {
+        // Never fetched this session, or fetched longer ago than the TTL.
+        // An empty cache is always stale — there is nothing to show otherwise.
+        if self.bars.is_empty() {
+            return true;
+        }
+        self.refreshed
+            .get(symbol)
+            .is_none_or(|t| t.elapsed() >= SYMBOL_TTL)
     }
 
     pub fn quote(&self, symbol: &str) -> Option<&Quote> {
@@ -557,6 +608,8 @@ impl App {
                 self.request(DataRequest::RefreshMarket);
                 if !self.selected.is_empty() {
                     let sym = self.selected.clone();
+                    // An explicit refresh overrides the freshness window.
+                    self.refreshed.insert(sym.clone(), Instant::now());
                     self.request(DataRequest::LoadSymbol(sym));
                 }
             }
@@ -803,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn selecting_a_symbol_clears_the_previous_series() {
+    fn selecting_a_symbol_drops_the_previous_series() {
         let mut a = app();
         a.select("HBL".into());
         a.bars = vec![Bar {
@@ -814,12 +867,101 @@ mod tests {
             close: 1.0,
             volume: 1.0,
         }];
+        // Nothing is cached for OGDC, so the previous symbol's bars must go
+        // rather than render under the new ticker.
         a.select("OGDC".into());
         assert!(
             a.bars.is_empty(),
             "stale bars must not render under a new ticker"
         );
         assert!(a.company.is_none());
+        assert!(a.ticks.is_empty());
+    }
+
+    /// Bars for a symbol, spaced one trading day apart.
+    fn cached_bars(n: usize) -> Vec<Bar> {
+        (0..n)
+            .map(|i| Bar {
+                ts: crate::cache::day_close_ts("2026-01-05") + i as i64 * 86_400,
+                open: 10.0,
+                high: 11.0,
+                low: 9.0,
+                close: 10.0 + i as f64,
+                volume: 100.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn selecting_paints_cached_bars_without_waiting_for_the_worker() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        store.put_eod_bars("HBL", &cached_bars(30)).unwrap();
+
+        let (tx, _rx) = detached_channel();
+        let mut a = App::new(store, tx);
+        a.select("HBL".into());
+
+        // Populated synchronously — no DataEvent has been delivered yet.
+        assert_eq!(a.bars.len(), 30, "cached history must paint immediately");
+    }
+
+    #[test]
+    fn revisiting_a_fresh_symbol_serves_cache_and_skips_the_network() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        store.put_eod_bars("HBL", &cached_bars(30)).unwrap();
+        store.put_eod_bars("OGDC", &cached_bars(30)).unwrap();
+
+        let (tx, mut rx) = detached_channel();
+        let mut a = App::new(store, tx);
+
+        a.select("HBL".into());
+        while rx.try_recv().is_ok() {} // drain the first, legitimate fetch
+
+        a.select("OGDC".into());
+        while rx.try_recv().is_ok() {}
+
+        // Back to HBL within the freshness window.
+        a.select("HBL".into());
+        assert_eq!(a.bars.len(), 30, "revisit must still show the history");
+        assert!(
+            rx.try_recv().is_err(),
+            "a revisit inside the TTL must not hit the network again"
+        );
+    }
+
+    #[test]
+    fn a_symbol_with_no_cached_history_always_fetches() {
+        let (tx, mut rx) = detached_channel();
+        let mut a = App::new(Arc::new(Store::open_in_memory().unwrap()), tx);
+
+        a.select("HBL".into());
+        assert_eq!(
+            rx.try_recv(),
+            Ok(DataRequest::LoadSymbol("HBL".into())),
+            "an empty cache leaves nothing to show, so it must fetch"
+        );
+    }
+
+    #[test]
+    fn explicit_refresh_requests_the_network_even_when_fresh() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        store.put_eod_bars("HBL", &cached_bars(30)).unwrap();
+
+        let (tx, mut rx) = detached_channel();
+        let mut a = App::new(store, tx);
+        a.select("HBL".into());
+        while rx.try_recv().is_ok() {}
+
+        a.on_key(key('r'));
+        let mut requests = Vec::new();
+        while let Ok(r) = rx.try_recv() {
+            requests.push(r);
+        }
+        assert!(requests.contains(&DataRequest::RefreshMarket));
+        assert!(
+            requests.contains(&DataRequest::LoadSymbol("HBL".into())),
+            "r must override the freshness window"
+        );
     }
 
     #[test]

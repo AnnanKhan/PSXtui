@@ -5,6 +5,7 @@
 //! post [`DataRequest`]s to a background worker and receive [`DataEvent`]s
 //! back, so the interface stays responsive while PSX is slow.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,6 +25,14 @@ pub const BENCHMARK: &str = "KSE100";
 /// cache — matching the market board's own refresh cadence, so nothing on
 /// screen is more stale than the quotes beside it.
 const SYMBOL_TTL: Duration = Duration::from_secs(60);
+
+/// How long the cursor must sit still before a symbol's data is fetched.
+///
+/// Scrolling a list selects every row it passes. Fetching each one would queue
+/// three requests per row against a rate limiter, so a quick scroll leaves the
+/// worker minutes behind the cursor. Cached data still paints on every move —
+/// only the network call waits for the cursor to settle.
+const LOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// How long a cached company profile is reused. Filings land a few times a
 /// quarter, so a day is generous.
@@ -161,6 +170,56 @@ impl SortKey {
             SortKey::Turnover => "Turnover",
         }
     }
+}
+
+/// One of the dashboard's leaderboards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Board {
+    Gainers,
+    Losers,
+    Active,
+}
+
+impl Board {
+    pub fn title(&self) -> &'static str {
+        match self {
+            Board::Gainers => "Top Gainers",
+            Board::Losers => "Top Losers",
+            Board::Active => "Most Active",
+        }
+    }
+}
+
+/// What the dashboard last drew.
+///
+/// Which boards fit, and how many rows each holds, are decisions the renderer
+/// makes from the available area. Key handling needs the same answer to keep
+/// the cursor on a row that is actually visible, so the renderer publishes it
+/// here after each frame.
+#[derive(Debug, Clone, Copy)]
+pub struct DashLayout {
+    pub boards: [Board; 3],
+    /// How many of `boards` were drawn.
+    pub count: usize,
+    /// Rows available inside each board.
+    pub rows: usize,
+}
+
+impl Default for DashLayout {
+    fn default() -> Self {
+        Self {
+            boards: [Board::Gainers, Board::Losers, Board::Active],
+            count: 3,
+            rows: 0,
+        }
+    }
+}
+
+/// Cursor position on the dashboard: which board, and which row within it.
+#[derive(Debug, Default)]
+pub struct DashboardState {
+    pub board: usize,
+    pub cursor: usize,
 }
 
 #[derive(Debug)]
@@ -335,6 +394,9 @@ pub struct App {
     pub benchmark: Vec<Bar>,
 
     pub screener: ScreenerState,
+    pub dashboard: DashboardState,
+    /// Published by the dashboard renderer each frame; read by key handling.
+    pub dash_layout: Cell<DashLayout>,
     pub chart: ChartState,
     pub company_tab: CompanyTab,
     pub announcement_cursor: usize,
@@ -355,6 +417,8 @@ pub struct App {
     /// When each symbol last went to the network, so revisits are served from
     /// the cache instead of refetching.
     refreshed: HashMap<String, Instant>,
+    /// A fetch waiting for the cursor to settle, and when it was queued.
+    pending_load: Option<(String, Instant)>,
 }
 
 impl App {
@@ -374,6 +438,8 @@ impl App {
             company: None,
             benchmark: Vec::new(),
             screener: ScreenerState::default(),
+            dashboard: DashboardState::default(),
+            dash_layout: Cell::new(DashLayout::default()),
             chart: ChartState::default(),
             company_tab: CompanyTab::Profile,
             announcement_cursor: 0,
@@ -386,6 +452,7 @@ impl App {
             backfill: None,
             spinner: 0,
             refreshed: HashMap::new(),
+            pending_load: None,
         }
     }
 
@@ -511,16 +578,41 @@ impl App {
             .ok()
             .flatten();
 
-        // Only go back to the network once the cached copy has aged out.
+        // Only go back to the network once the cached copy has aged out, and
+        // even then not until the cursor settles — see [`LOAD_DEBOUNCE`].
         if self.is_stale(&symbol) {
-            self.refreshed.insert(symbol.clone(), Instant::now());
-            self.request(DataRequest::LoadSymbol(symbol.clone()));
-            if self.company.is_none() {
-                self.request(DataRequest::LoadCompany(symbol));
-            }
+            self.pending_load = Some((symbol, Instant::now()));
         } else {
+            self.pending_load = None;
             self.status = format!("{symbol} — from cache");
         }
+    }
+
+    /// Issue a deferred fetch once the cursor has stopped moving.
+    ///
+    /// Driven by the UI tick. Returns whether a request was sent.
+    pub fn poll_pending_load(&mut self) -> bool {
+        let Some((symbol, since)) = &self.pending_load else {
+            return false;
+        };
+        if since.elapsed() < LOAD_DEBOUNCE {
+            return false;
+        }
+
+        let symbol = symbol.clone();
+        self.pending_load = None;
+
+        // The cursor may have moved on, or a refresh may have landed already.
+        if symbol != self.selected || !self.is_stale(&symbol) {
+            return false;
+        }
+
+        self.refreshed.insert(symbol.clone(), Instant::now());
+        self.request(DataRequest::LoadSymbol(symbol.clone()));
+        if self.company.is_none() {
+            self.request(DataRequest::LoadCompany(symbol));
+        }
+        true
     }
 
     /// Whether `symbol`'s live data is due a network refresh.
@@ -606,6 +698,44 @@ impl App {
             if desc { ord.reverse() } else { ord }
         });
         rows
+    }
+
+    // --- dashboard -------------------------------------------------------
+
+    /// Rows of one leaderboard, capped at `n`.
+    ///
+    /// Shared by the renderer and by key handling so the cursor can never
+    /// address a row the dashboard didn't draw. Untraded scrips are excluded:
+    /// a limit-up print on zero volume isn't a real mover.
+    pub fn leaderboard(&self, board: Board, n: usize) -> Vec<&Quote> {
+        let mut v: Vec<&Quote> = self
+            .visible_quotes()
+            .into_iter()
+            .filter(|q| q.volume > 0.0)
+            .collect();
+
+        match board {
+            Board::Gainers => v.sort_by(|a, b| b.change_pct.total_cmp(&a.change_pct)),
+            Board::Losers => v.sort_by(|a, b| a.change_pct.total_cmp(&b.change_pct)),
+            Board::Active => v.sort_by(|a, b| b.turnover().total_cmp(&a.turnover())),
+        }
+        v.truncate(n);
+        v
+    }
+
+    /// The board the dashboard cursor is on.
+    pub fn dash_board(&self) -> Board {
+        let l = self.dash_layout.get();
+        let i = self.dashboard.board.min(l.count.saturating_sub(1));
+        l.boards[i.min(2)]
+    }
+
+    /// The symbol under the dashboard cursor, if any.
+    pub fn dash_symbol(&self) -> Option<String> {
+        let rows = self.dash_layout.get().rows;
+        self.leaderboard(self.dash_board(), rows)
+            .get(self.dashboard.cursor)
+            .map(|q| q.symbol.clone())
     }
 
     pub fn watchlist_toggle(&mut self, symbol: &str) {
@@ -701,10 +831,66 @@ impl App {
 
     fn on_screen_key(&mut self, key: KeyEvent) {
         match self.screen {
-            Screen::Screener | Screen::Dashboard => self.on_list_key(key),
+            Screen::Dashboard => self.on_dashboard_key(key),
+            Screen::Screener => self.on_list_key(key),
             Screen::Chart => self.on_chart_key(key),
             Screen::Company => self.on_company_key(key),
             Screen::Analysis | Screen::Intraday => {}
+        }
+    }
+
+    /// Dashboard navigation moves within the focused leaderboard.
+    ///
+    /// The cursor is deliberately *not* an index into the full quote list:
+    /// the dashboard only draws a dozen-odd rows per board, so indexing the
+    /// whole market walked the cursor off-screen and the highlight vanished.
+    fn on_dashboard_key(&mut self, key: KeyEvent) {
+        let layout = self.dash_layout.get();
+        let boards = layout.count.max(1);
+        let len = self.leaderboard(self.dash_board(), layout.rows).len();
+        if len == 0 {
+            return;
+        }
+        let last = len - 1;
+
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.dashboard.cursor = (self.dashboard.cursor + 1).min(last)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.dashboard.cursor = self.dashboard.cursor.saturating_sub(1)
+            }
+            KeyCode::PageDown => self.dashboard.cursor = (self.dashboard.cursor + 10).min(last),
+            KeyCode::PageUp => self.dashboard.cursor = self.dashboard.cursor.saturating_sub(10),
+            KeyCode::Home | KeyCode::Char('g') => self.dashboard.cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => self.dashboard.cursor = last,
+
+            // Move between boards, keeping the row where it still exists.
+            // Tab is not used here — it switches screens globally.
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.dashboard.board = (self.dashboard.board + 1) % boards;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.dashboard.board = (self.dashboard.board + boards - 1) % boards;
+            }
+
+            KeyCode::Enter => {
+                if let Some(sym) = self.dash_symbol() {
+                    self.select(sym);
+                    self.screen = Screen::Chart;
+                }
+                return;
+            }
+            _ => return,
+        }
+
+        // Clamp after a board change: boards can differ in length.
+        let len = self.leaderboard(self.dash_board(), layout.rows).len();
+        self.dashboard.cursor = self.dashboard.cursor.min(len.saturating_sub(1));
+
+        // Track the highlighted row so the detail screens follow it.
+        if let Some(sym) = self.dash_symbol() {
+            self.select(sym);
         }
     }
 
@@ -990,17 +1176,99 @@ mod tests {
         );
     }
 
+    /// Pretend the cursor has been still for longer than the debounce.
+    fn settle(a: &mut App) -> bool {
+        if let Some((sym, _)) = a.pending_load.take() {
+            a.pending_load = Some((sym, Instant::now() - LOAD_DEBOUNCE));
+        }
+        a.poll_pending_load()
+    }
+
     #[test]
-    fn a_symbol_with_no_cached_history_always_fetches() {
+    fn a_symbol_with_no_cached_history_fetches_once_settled() {
         let (tx, mut rx) = detached_channel();
         let mut a = App::new(Arc::new(Store::open_in_memory().unwrap()), tx);
 
         a.select("HBL".into());
+        assert!(
+            rx.try_recv().is_err(),
+            "the fetch waits for the cursor to settle"
+        );
+
+        assert!(settle(&mut a));
         assert_eq!(
             rx.try_recv(),
             Ok(DataRequest::LoadSymbol("HBL".into())),
             "an empty cache leaves nothing to show, so it must fetch"
         );
+    }
+
+    #[test]
+    fn scrolling_past_rows_queues_one_fetch_not_one_per_row() {
+        // The bug this guards: every arrow keypress selected a row and fired
+        // three requests, so a quick scroll left the worker minutes behind.
+        let (tx, mut rx) = detached_channel();
+        let mut a = App::new(Arc::new(Store::open_in_memory().unwrap()), tx);
+        a.on_event(DataEvent::Quotes(
+            (0..60)
+                .map(|i| {
+                    quote(
+                        &format!("S{i:02}"),
+                        10.0 + i as f64,
+                        i as f64 - 30.0,
+                        1000.0,
+                    )
+                })
+                .collect(),
+        ));
+        a.screener.equities_only = false;
+        a.screen = Screen::Dashboard;
+        a.dash_layout.set(DashLayout {
+            boards: [Board::Gainers, Board::Losers, Board::Active],
+            count: 3,
+            rows: 12,
+        });
+        while rx.try_recv().is_ok() {}
+
+        for _ in 0..20 {
+            a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "scrolling must not fetch a row it is merely passing over"
+        );
+
+        let landed = a.selected.clone();
+        assert!(!landed.is_empty());
+        assert!(settle(&mut a));
+
+        let requests: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(!requests.is_empty(), "the settled row must be fetched");
+        assert!(
+            requests.iter().all(|r| matches!(
+                r,
+                DataRequest::LoadSymbol(s) | DataRequest::LoadCompany(s) if *s == landed
+            )),
+            "only the settled symbol may be fetched, got {requests:?}"
+        );
+    }
+
+    #[test]
+    fn a_pending_fetch_is_dropped_if_the_cursor_moves_on() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (tx, mut rx) = detached_channel();
+        let mut a = App::new(store, tx);
+
+        a.select("HBL".into());
+        a.select("OGDC".into());
+        assert!(settle(&mut a));
+
+        let requests: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            !requests.contains(&DataRequest::LoadSymbol("HBL".into())),
+            "the abandoned symbol must not be fetched"
+        );
+        assert!(requests.contains(&DataRequest::LoadSymbol("OGDC".into())));
     }
 
     #[test]
@@ -1350,6 +1618,132 @@ mod tests {
         a.spinner = usize::MAX;
         a.tick();
         assert!(a.spinner_glyph().is_alphanumeric() || !a.spinner_glyph().is_control());
+    }
+
+    /// A market with more symbols than any board can display.
+    fn busy_market() -> App {
+        let mut a = app();
+        let quotes: Vec<Quote> = (0..60)
+            .map(|i| {
+                let mut q = quote(
+                    &format!("S{i:02}"),
+                    10.0 + i as f64,
+                    i as f64 - 30.0,
+                    1000.0,
+                );
+                q.volume = 1000.0 + i as f64;
+                q
+            })
+            .collect();
+        a.on_event(DataEvent::Quotes(quotes));
+        a.screener.equities_only = false;
+        a.screen = Screen::Dashboard;
+        // Stand in for a render: 3 boards of 12 rows each.
+        a.dash_layout.set(DashLayout {
+            boards: [Board::Gainers, Board::Losers, Board::Active],
+            count: 3,
+            rows: 12,
+        });
+        a
+    }
+
+    #[test]
+    fn dashboard_cursor_cannot_run_past_the_rows_on_screen() {
+        // The bug: the cursor indexed the whole market (60 symbols) while the
+        // board only drew 12 rows, so it walked off-screen and the highlight
+        // vanished.
+        let mut a = busy_market();
+        for _ in 0..50 {
+            a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(a.dashboard.cursor, 11, "must stop at the last drawn row");
+        assert!(
+            a.dash_symbol().is_some(),
+            "the cursor must always sit on a visible row"
+        );
+    }
+
+    #[test]
+    fn dashboard_end_key_lands_on_the_last_visible_row() {
+        let mut a = busy_market();
+        a.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(a.dashboard.cursor, 11);
+
+        let expected = a.leaderboard(Board::Gainers, 12)[11].symbol.clone();
+        assert_eq!(a.dash_symbol().as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn dashboard_arrows_switch_boards_and_track_the_right_symbol() {
+        let mut a = busy_market();
+        assert_eq!(a.dash_board(), Board::Gainers);
+        let top_gainer = a.dash_symbol().unwrap();
+
+        a.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(a.dash_board(), Board::Losers);
+        let top_loser = a.dash_symbol().unwrap();
+        assert_ne!(top_gainer, top_loser);
+        assert_eq!(a.selected, top_loser, "selection follows the focused board");
+
+        a.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(a.dash_board(), Board::Active);
+
+        // Wraps back around.
+        a.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(a.dash_board(), Board::Gainers);
+    }
+
+    #[test]
+    fn dashboard_cursor_is_clamped_when_a_shorter_board_is_focused() {
+        let mut a = app();
+        // Two gainers, but only one name is down on the day.
+        let mut down = quote("DOWN", 10.0, -5.0, 100.0);
+        down.volume = 100.0;
+        a.on_event(DataEvent::Quotes(vec![
+            quote("UP1", 10.0, 5.0, 100.0),
+            quote("UP2", 10.0, 4.0, 100.0),
+            down,
+        ]));
+        a.screener.equities_only = false;
+        a.screen = Screen::Dashboard;
+        a.dash_layout.set(DashLayout {
+            boards: [Board::Gainers, Board::Losers, Board::Active],
+            count: 3,
+            rows: 12,
+        });
+
+        a.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(a.dashboard.cursor, 2);
+
+        // Losers holds a single row; the cursor must come back into range.
+        a.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(
+            a.dashboard.cursor < a.leaderboard(Board::Losers, 12).len(),
+            "cursor must be clamped to the shorter board"
+        );
+        assert!(a.dash_symbol().is_some());
+    }
+
+    #[test]
+    fn dashboard_navigation_is_safe_before_the_first_render() {
+        // dash_layout starts with rows = 0; keys must not panic or select.
+        let mut a = app();
+        a.screen = Screen::Dashboard;
+        a.on_event(DataEvent::Quotes(vec![quote("AAA", 10.0, 1.0, 100.0)]));
+        a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.dashboard.cursor, 0);
+    }
+
+    #[test]
+    fn dashboard_enter_opens_the_focused_row_in_the_chart() {
+        let mut a = busy_market();
+        a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let expected = a.dash_symbol().unwrap();
+
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.screen, Screen::Chart);
+        assert_eq!(a.selected, expected);
     }
 
     #[test]

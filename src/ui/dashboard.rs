@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::app::App;
+use crate::app::{App, Board, DashLayout};
 use crate::model::Quote;
 
 use super::theme;
@@ -54,19 +54,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let cursor_symbol = app
-        .visible_quotes()
-        .get(app.screener.cursor)
-        .map(|q| q.symbol.clone());
-    let cursor = cursor_symbol.as_deref();
-
     let [breadth_area, lists_area, sector_area] = split_rows(area);
 
     if breadth_area.height > 0 {
         draw_breadth(f, breadth_area, app);
     }
     if lists_area.height > 0 {
-        draw_lists(f, lists_area, app, cursor);
+        draw_lists(f, lists_area, app);
     }
     if sector_area.height > 0 {
         draw_sectors(f, sector_area, app);
@@ -368,13 +362,14 @@ fn quote_line(q: &Quote, width: usize, by_value: bool, selected: bool) -> Line<'
     }
 }
 
+/// Draw one leaderboard. `cursor` is `Some(row)` only for the focused board.
 fn draw_quote_list(
     f: &mut Frame,
     area: Rect,
     title: &str,
     rows: &[&Quote],
     by_value: bool,
-    cursor: Option<&str>,
+    cursor: Option<usize>,
 ) {
     let block = widgets::panel(title);
     let inner = block.inner(area);
@@ -394,9 +389,8 @@ fn draw_quote_list(
     if rows.is_empty() {
         lines.push(widgets::placeholder("no data"));
     } else {
-        for q in rows.iter().take(budget) {
-            let selected = cursor.is_some_and(|c| c == q.symbol);
-            lines.push(quote_line(q, w, by_value, selected));
+        for (i, q) in rows.iter().take(budget).enumerate() {
+            lines.push(quote_line(q, w, by_value, cursor == Some(i)));
         }
     }
 
@@ -404,56 +398,62 @@ fn draw_quote_list(
 }
 
 /// Rank the tradable board. `n` is capped by the caller's row budget.
-fn leaders<'a>(quotes: &[&'a Quote], n: usize, gainers: bool) -> Vec<&'a Quote> {
-    let mut v: Vec<&Quote> = quotes.iter().copied().filter(|q| q.volume > 0.0).collect();
-    v.sort_by(|a, b| {
-        if gainers {
-            b.change_pct.total_cmp(&a.change_pct)
-        } else {
-            a.change_pct.total_cmp(&b.change_pct)
-        }
-    });
-    v.truncate(n);
-    v
-}
-
-fn most_active<'a>(quotes: &[&'a Quote], n: usize) -> Vec<&'a Quote> {
-    let mut v: Vec<&Quote> = quotes.iter().copied().filter(|q| q.volume > 0.0).collect();
-    v.sort_by(|a, b| b.turnover().total_cmp(&a.turnover()));
-    v.truncate(n);
-    v
-}
-
-fn draw_lists(f: &mut Frame, area: Rect, app: &App, cursor: Option<&str>) {
-    let visible = app.visible_quotes();
+fn draw_lists(f: &mut Frame, area: Rect, app: &App) {
     // One header line plus borders eat three rows; never ask for more.
     let cap = (area.height as usize).saturating_sub(3).max(1);
 
-    let gainers = leaders(&visible, cap, true);
-    let losers = leaders(&visible, cap, false);
-    let actives = most_active(&visible, cap);
-
-    if area.width >= 96 {
+    // Which boards fit is a layout decision, so it is made here and published
+    // for key handling — otherwise the cursor could address a board or row
+    // that was never drawn.
+    let (boards, areas) = if area.width >= 96 {
         let cols = Layout::horizontal([
             Constraint::Ratio(1, 3),
             Constraint::Ratio(1, 3),
             Constraint::Ratio(1, 3),
         ])
         .split(area);
-        draw_quote_list(f, cols[0], "Top Gainers", &gainers, false, cursor);
-        draw_quote_list(f, cols[1], "Top Losers", &losers, false, cursor);
-        draw_quote_list(f, cols[2], "Most Active", &actives, true, cursor);
+        (
+            vec![Board::Gainers, Board::Losers, Board::Active],
+            vec![cols[0], cols[1], cols[2]],
+        )
     } else if area.width >= 60 {
         let cols =
             Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(area);
-        draw_quote_list(f, cols[0], "Top Gainers", &gainers, false, cursor);
-        draw_quote_list(f, cols[1], "Top Losers", &losers, false, cursor);
+        (vec![Board::Gainers, Board::Losers], vec![cols[0], cols[1]])
     } else if area.height >= 10 {
         let rows = Layout::vertical([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(area);
-        draw_quote_list(f, rows[0], "Gainers", &gainers, false, cursor);
-        draw_quote_list(f, rows[1], "Losers", &losers, false, cursor);
+        (vec![Board::Gainers, Board::Losers], vec![rows[0], rows[1]])
     } else {
-        draw_quote_list(f, area, "Most Active", &actives, true, cursor);
+        (vec![Board::Active], vec![area])
+    };
+
+    let mut published = DashLayout {
+        boards: [Board::Gainers, Board::Losers, Board::Active],
+        count: boards.len(),
+        rows: cap,
+    };
+    for (i, b) in boards.iter().enumerate() {
+        published.boards[i] = *b;
+    }
+    app.dash_layout.set(published);
+
+    // The focused board, clamped the same way key handling clamps it.
+    let focused = app.dashboard.board.min(boards.len().saturating_sub(1));
+
+    for (i, (board, rect)) in boards.iter().zip(areas).enumerate() {
+        let rows = app.leaderboard(*board, cap);
+        // Highlight by position, not by symbol: a scrip can top both the
+        // gainers and the most-active board, and matching on the symbol lit
+        // it up in both places at once.
+        let selected = (i == focused).then_some(app.dashboard.cursor);
+        draw_quote_list(
+            f,
+            rect,
+            board.title(),
+            &rows,
+            *board == Board::Active,
+            selected,
+        );
     }
 }
 
@@ -787,19 +787,22 @@ mod tests {
 
     #[test]
     fn leaders_rank_by_change_and_skip_untraded() {
-        let quotes = [
+        let mut app = app_with(vec![
             quote("A", "S", 10.0, 5.0, 100.0),
             quote("B", "S", 10.0, 9.0, 0.0),
             quote("C", "S", 10.0, -7.0, 100.0),
-        ];
-        let refs: Vec<&Quote> = quotes.iter().collect();
-        let g = leaders(&refs, 5, true);
+        ]);
+        app.screener.equities_only = false;
+
+        let g = app.leaderboard(Board::Gainers, 5);
         assert_eq!(g.len(), 2, "the untraded limit-up name is excluded");
         assert_eq!(g[0].symbol, "A");
-        let l = leaders(&refs, 5, false);
+
+        let l = app.leaderboard(Board::Losers, 5);
         assert_eq!(l[0].symbol, "C");
-        assert_eq!(most_active(&refs, 1)[0].symbol, "A");
-        assert!(leaders(&[], 5, true).is_empty());
+
+        assert_eq!(app.leaderboard(Board::Active, 1)[0].symbol, "A");
+        assert!(app_with(vec![]).leaderboard(Board::Gainers, 5).is_empty());
     }
 
     fn render(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
@@ -851,25 +854,65 @@ mod tests {
         assert!(text.contains("Loading"), "empty state must be explained");
     }
 
+    /// Rows carrying the selection background, as `(symbol, y)`.
+    fn highlighted(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+        let mut out = Vec::new();
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            let lit = (0..buf.area.width).any(|x| buf[(x, y)].bg == theme::SELECT_BG);
+            if lit && !row.trim().is_empty() {
+                out.push(row.trim().to_string());
+            }
+        }
+        out
+    }
+
     #[test]
     fn the_cursor_row_is_highlighted() {
         let mut app = app_with(vec![
             quote("AAA", "BANKS", 10.0, 5.0, 100.0),
             quote("BBB", "BANKS", 10.0, -5.0, 100.0),
         ]);
-        app.screener.cursor = 0;
-        let target = app.visible_quotes()[0].symbol.clone();
-        let buf = render(&app, 80, 24);
+        app.dashboard.board = 0; // Top Gainers
+        app.dashboard.cursor = 0;
 
-        let mut found = false;
-        for y in 0..buf.area.height {
-            let row: String = (0..buf.area.width)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect();
-            if row.contains(&target) && buf[(2, y)].bg == theme::SELECT_BG {
-                found = true;
-            }
-        }
-        assert!(found, "the row under the cursor must be highlighted");
+        let buf = render(&app, 80, 24);
+        let lit = highlighted(&buf);
+        assert_eq!(lit.len(), 1, "exactly one row may be highlighted");
+        assert!(lit[0].contains("AAA"), "got {lit:?}");
+    }
+
+    #[test]
+    fn only_the_focused_board_highlights_a_shared_symbol() {
+        // One scrip tops both the gainers and the most-active board. Matching
+        // by symbol used to light it up on both at once.
+        let app = app_with(vec![
+            quote("HOT", "BANKS", 100.0, 9.0, 1_000_000.0),
+            quote("MEH", "BANKS", 10.0, -5.0, 10.0),
+        ]);
+        assert_eq!(app.leaderboard(Board::Gainers, 10)[0].symbol, "HOT");
+        assert_eq!(app.leaderboard(Board::Active, 10)[0].symbol, "HOT");
+
+        let buf = render(&app, 120, 24);
+        assert_eq!(
+            highlighted(&buf).len(),
+            1,
+            "a symbol on two boards must only highlight on the focused one"
+        );
+    }
+
+    #[test]
+    fn rendering_publishes_the_layout_for_key_handling() {
+        let app = app_with(vec![quote("AAA", "BANKS", 10.0, 5.0, 100.0)]);
+
+        render(&app, 120, 30);
+        let wide = app.dash_layout.get();
+        assert_eq!(wide.count, 3, "all three boards fit at 120 columns");
+        assert!(wide.rows > 0);
+
+        render(&app, 70, 30);
+        assert_eq!(app.dash_layout.get().count, 2, "only two boards fit at 70");
     }
 }

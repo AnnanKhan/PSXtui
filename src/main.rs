@@ -79,7 +79,10 @@ async fn run(
                 app.request(DataRequest::RefreshMarket);
             }
             _ = spinner.tick() => {
-                if !app.is_busy() {
+                // Fire any fetch whose cursor has settled, then advance the
+                // spinner. Skip the redraw entirely when nothing is happening.
+                let fired = app.poll_pending_load();
+                if !fired && !app.is_busy() {
                     continue;
                 }
                 app.tick();

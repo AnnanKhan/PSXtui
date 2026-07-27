@@ -25,8 +25,9 @@ pub mod indicators;
 pub mod stats;
 
 pub use indicators::{
-    BollingerOutput, MacdOutput, StochasticOutput, atr, bollinger, ema, macd, obv, rsi, sma,
-    stochastic, vwap_session,
+    AdxOutput, BollingerOutput, DonchianOutput, IchimokuOutput, Level, MacdOutput,
+    StochasticOutput, adx, atr, bollinger, cci, donchian, ema, ichimoku, macd, obv, rsi, sma,
+    stochastic, support_resistance, vwap_session, week52_position, williams_r,
 };
 pub use stats::{
     Drawdown, TRADING_DAYS_PER_YEAR, annualized_return, annualized_volatility, beta, correlation,

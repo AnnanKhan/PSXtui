@@ -18,12 +18,13 @@ use crate::app::{App, BENCHMARK};
 use crate::cache::trading_day;
 use crate::model::Bar;
 
-/// Risk-free rate used for Sharpe and Sortino.
-///
-/// Pakistan's policy rate has run in double digits for years, so annualising
-/// against zero would flatter every scrip on the exchange. It is labelled on
-/// screen so the ratios stay interpretable.
-const RISK_FREE: f64 = 0.11;
+// The risk-free rate for Sharpe and Sortino is the live SBP policy rate,
+// scraped by `crate::ext::macros` and read through `App::risk_free`.
+//
+// Pakistan's policy rate has run in double digits for years, so annualising
+// against zero would flatter every scrip on the exchange — and a hardcoded
+// constant silently ages into the same error. It is labelled on screen, with
+// its source, so the ratios stay interpretable.
 
 /// Below this many sessions the statistics are noise, not information.
 const MIN_BARS: usize = 30;
@@ -123,8 +124,9 @@ fn draw_risk(f: &mut Frame, area: Rect, app: &App) {
     let returns = stats::simple_returns(&closes);
     let ann_ret = stats::annualized_return(&returns, TRADING_DAYS_PER_YEAR) * 100.0;
     let ann_vol = stats::annualized_volatility(&returns, TRADING_DAYS_PER_YEAR) * 100.0;
-    let sharpe = stats::sharpe_ratio(&returns, RISK_FREE, TRADING_DAYS_PER_YEAR);
-    let sortino = stats::sortino_ratio(&returns, RISK_FREE, TRADING_DAYS_PER_YEAR);
+    let risk_free = app.risk_free();
+    let sharpe = stats::sharpe_ratio(&returns, risk_free, TRADING_DAYS_PER_YEAR);
+    let sortino = stats::sortino_ratio(&returns, risk_free, TRADING_DAYS_PER_YEAR);
 
     let w = 12;
     let lines = vec![
@@ -134,7 +136,7 @@ fn draw_risk(f: &mut Frame, area: Rect, app: &App) {
         widgets::stat_signed("Sharpe", sharpe, format!("{sharpe:.2}"), w),
         widgets::stat_signed("Sortino", sortino, format!("{sortino:.2}"), w),
         Line::raw(""),
-        widgets::stat("Risk-free", theme::pct_plain(RISK_FREE * 100.0), w),
+        widgets::stat("Risk-free", theme::pct_plain(risk_free * 100.0), w),
         Line::from(Span::styled(
             format!("{:<w$} SBP policy rate p.a.", "", w = w),
             theme::label_style(),

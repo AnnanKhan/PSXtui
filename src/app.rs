@@ -6,6 +6,7 @@
 //! back, so the interface stays responsive while PSX is slow.
 
 use std::cell::Cell;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,6 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::cache::Store;
+use crate::ext::{Headline, MacroRates, MacroSeries};
 use crate::model::{Bar, Company, Index, Quote, SymbolInfo, Tick};
 
 /// The benchmark every risk statistic is measured against.
@@ -51,6 +53,8 @@ pub enum DataRequest {
     LoadCompany(String),
     /// Backfill true-OHLC daily snapshots for the last N calendar days.
     Backfill(i64),
+    /// Refresh external market context: commodities/FX, headlines, policy rate.
+    RefreshExternal,
 }
 
 /// Results flowing back from the background worker.
@@ -81,6 +85,12 @@ pub enum DataEvent {
     Backfill(BackfillProgress),
     /// Backfill finished, or had nothing to do.
     BackfillDone,
+    /// Commodity, FX and global-index series for the Macro screen.
+    MacroSeries(Vec<MacroSeries>),
+    /// Business headlines, newest first.
+    Headlines(Vec<Headline>),
+    /// Policy rates — the risk-free rate the analysis screens measure against.
+    Rates(MacroRates),
 }
 
 /// How far the whole-market OHLC backfill has got.
@@ -113,16 +123,22 @@ pub enum Screen {
     Analysis,
     Company,
     Intraday,
+    Compare,
+    Seasonality,
+    Macro,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 6] = [
+    pub const ALL: [Screen; 9] = [
         Screen::Dashboard,
         Screen::Screener,
         Screen::Chart,
         Screen::Analysis,
         Screen::Company,
         Screen::Intraday,
+        Screen::Compare,
+        Screen::Seasonality,
+        Screen::Macro,
     ];
 
     pub fn title(&self) -> &'static str {
@@ -133,6 +149,9 @@ impl Screen {
             Screen::Analysis => "Analysis",
             Screen::Company => "Company",
             Screen::Intraday => "Intraday",
+            Screen::Compare => "Compare",
+            Screen::Seasonality => "Seasonality",
+            Screen::Macro => "Macro",
         }
     }
 
@@ -150,15 +169,35 @@ pub enum SortKey {
     Change,
     Volume,
     Turnover,
+    // --- valuation view ---
+    Pe,
+    Eps,
+    EpsGrowth,
+    NetMargin,
+    MarketCap,
+    FreeFloat,
 }
 
 impl SortKey {
+    /// Cycled by `s` on the price board.
     pub const ALL: [SortKey; 5] = [
         SortKey::Symbol,
         SortKey::Price,
         SortKey::Change,
         SortKey::Volume,
         SortKey::Turnover,
+    ];
+
+    /// Cycled by `s` in the valuation view — the fundamentals columns, plus
+    /// the symbol so there is always an alphabetical fallback.
+    pub const VALUATION: [SortKey; 7] = [
+        SortKey::Symbol,
+        SortKey::MarketCap,
+        SortKey::Pe,
+        SortKey::Eps,
+        SortKey::EpsGrowth,
+        SortKey::NetMargin,
+        SortKey::FreeFloat,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -168,7 +207,18 @@ impl SortKey {
             SortKey::Change => "Change %",
             SortKey::Volume => "Volume",
             SortKey::Turnover => "Turnover",
+            SortKey::Pe => "P/E",
+            SortKey::Eps => "EPS",
+            SortKey::EpsGrowth => "EPS growth",
+            SortKey::NetMargin => "Net margin",
+            SortKey::MarketCap => "Market cap",
+            SortKey::FreeFloat => "Free float",
         }
+    }
+
+    /// Whether this key ranks a fundamentals column rather than a price one.
+    pub fn is_valuation(&self) -> bool {
+        SortKey::VALUATION.contains(self) && *self != SortKey::Symbol
     }
 }
 
@@ -203,6 +253,8 @@ pub struct DashLayout {
     pub count: usize,
     /// Rows available inside each board.
     pub rows: usize,
+    /// Rows the sector heatmap can draw at once.
+    pub sector_rows: usize,
 }
 
 impl Default for DashLayout {
@@ -211,15 +263,41 @@ impl Default for DashLayout {
             boards: [Board::Gainers, Board::Losers, Board::Active],
             count: 3,
             rows: 0,
+            sector_rows: 0,
         }
     }
 }
 
-/// Cursor position on the dashboard: which board, and which row within it.
+/// One sector's aggregate performance across the board.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SectorAgg {
+    pub name: String,
+    /// Turnover-weighted average change %, falling back to a plain mean when
+    /// nothing in the sector traded.
+    pub avg_pct: f64,
+    pub turnover: f64,
+    pub count: usize,
+}
+
+/// Which half of the dashboard the keyboard is driving.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DashFocus {
+    #[default]
+    Boards,
+    Sectors,
+}
+
+/// Cursor position on the dashboard: which board, and which row within it,
+/// plus a separate cursor for the sector heatmap.
 #[derive(Debug, Default)]
 pub struct DashboardState {
     pub board: usize,
     pub cursor: usize,
+    pub focus: DashFocus,
+    /// Row of the sector heatmap under the cursor.
+    pub sector: usize,
+    /// First sector row drawn, for scrolling a list taller than the pane.
+    pub sector_offset: usize,
 }
 
 #[derive(Debug)]
@@ -233,6 +311,11 @@ pub struct ScreenerState {
     pub watchlist_only: bool,
     /// Hide debt instruments and ETFs, which dominate the raw symbol list.
     pub equities_only: bool,
+    /// Swap the OHLC columns for fundamentals (P/E, EPS, margins, market cap).
+    ///
+    /// Company profiles are fetched on demand, so this view is only ever as
+    /// complete as the local cache — see [`App::fundamentals`].
+    pub valuation: bool,
 }
 
 impl Default for ScreenerState {
@@ -244,51 +327,171 @@ impl Default for ScreenerState {
             offset: 0,
             watchlist_only: false,
             equities_only: true,
+            valuation: false,
         }
     }
+}
+
+/// One row of the screener's valuation view, reduced from a cached [`Company`].
+///
+/// Every field is optional and independently so: PSX publishes a P/E for some
+/// scrips and not others, banks report "Mark-up Earned" where industrials
+/// report "Sales", and a newly listed company has no prior year to grow from.
+/// Nothing here is ever imputed — a missing number stays missing all the way to
+/// the screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Valuation {
+    /// Price / earnings, as published on the company quote tab.
+    pub pe: Option<f64>,
+    /// Earnings per share for the most recent *annual* period.
+    pub eps: Option<f64>,
+    /// Year-on-year EPS growth, in percent.
+    pub eps_growth_pct: Option<f64>,
+    /// Net profit margin, in percent.
+    pub net_margin_pct: Option<f64>,
+    /// Market capitalisation in **PKR**. PSX publishes it in thousands; the
+    /// conversion happens once, here, so no renderer has to remember.
+    pub market_cap: Option<f64>,
+    /// Free float as a percentage of shares outstanding.
+    pub free_float_pct: Option<f64>,
+}
+
+impl Valuation {
+    /// Reduce a cached company profile to its valuation row.
+    pub fn from_company(c: &Company) -> Self {
+        // The financials and ratios tables are published newest column first.
+        let latest = c.financials_annual.first();
+        let prior = c.financials_annual.get(1);
+        let ratios = c.ratios.first();
+
+        // PSX already computes both of these; recomputing from the raw rows
+        // would mean guessing at sector-specific labels, so prefer the
+        // published ratio and only fall back where it is absent.
+        let eps_growth_pct = ratio_row(ratios, "EPS Growth").or_else(|| {
+            let (now, then) = (latest?.eps()?, prior?.eps()?);
+            if then == 0.0 {
+                // Growth from nothing is undefined, not infinite.
+                return None;
+            }
+            Some((now - then) / then.abs() * 100.0)
+        });
+
+        // Free float is published as a percentage for most scrips and as a
+        // share count for the rest.
+        let free_float_pct = c.free_float_pct.or_else(|| {
+            let (float, shares) = (c.free_float?, c.shares?);
+            if shares > 0.0 {
+                Some(float / shares * 100.0)
+            } else {
+                None
+            }
+        });
+
+        Self {
+            pe: finite_opt(c.pe_ratio),
+            eps: finite_opt(latest.and_then(|p| p.eps())),
+            eps_growth_pct: finite_opt(eps_growth_pct),
+            net_margin_pct: finite_opt(ratio_row(ratios, "Net Profit Margin")),
+            market_cap: finite_opt(c.market_cap_000.map(|v| v * 1_000.0)),
+            free_float_pct: finite_opt(free_float_pct),
+        }
+    }
+
+    /// The value a valuation [`SortKey`] ranks on, if this row has it.
+    pub fn key(&self, sort: SortKey) -> Option<f64> {
+        match sort {
+            SortKey::Pe => self.pe,
+            SortKey::Eps => self.eps,
+            SortKey::EpsGrowth => self.eps_growth_pct,
+            SortKey::NetMargin => self.net_margin_pct,
+            SortKey::MarketCap => self.market_cap,
+            SortKey::FreeFloat => self.free_float_pct,
+            _ => None,
+        }
+    }
+}
+
+/// Look up a ratio row by label prefix.
+///
+/// PSX suffixes the unit onto the label ("Net Profit Margin (%)"), and the
+/// exact wording drifts between sectors, so matching is by prefix rather than
+/// equality.
+fn ratio_row(period: Option<&crate::model::RatioPeriod>, prefix: &str) -> Option<f64> {
+    period?
+        .rows
+        .iter()
+        .find(|(k, _)| {
+            k.trim()
+                .to_ascii_lowercase()
+                .starts_with(&prefix.to_ascii_lowercase())
+        })
+        .map(|(_, v)| *v)
+}
+
+/// Drop a value that is present but not a usable number.
+fn finite_opt(v: Option<f64>) -> Option<f64> {
+    v.filter(|x| x.is_finite())
 }
 
 /// How much history the chart shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Range {
+    D5,
     M1,
     M3,
     M6,
+    Ytd,
     Y1,
+    Y2,
     Y3,
+    Y5,
     Max,
 }
 
 impl Range {
-    pub const ALL: [Range; 6] = [
+    pub const ALL: [Range; 10] = [
+        Range::D5,
         Range::M1,
         Range::M3,
         Range::M6,
+        Range::Ytd,
         Range::Y1,
+        Range::Y2,
         Range::Y3,
+        Range::Y5,
         Range::Max,
     ];
 
     pub fn label(&self) -> &'static str {
         match self {
+            Range::D5 => "5D",
             Range::M1 => "1M",
             Range::M3 => "3M",
             Range::M6 => "6M",
+            Range::Ytd => "YTD",
             Range::Y1 => "1Y",
+            Range::Y2 => "2Y",
             Range::Y3 => "3Y",
+            Range::Y5 => "5Y",
             Range::Max => "MAX",
         }
     }
 
-    /// Number of trading sessions to display, or `None` for everything.
+    /// Trading sessions to display.
+    ///
+    /// `None` means the window is not a fixed count — `Max` shows everything
+    /// and `Ytd` is bounded by the calendar, not a session count.
     pub fn sessions(&self) -> Option<usize> {
         match self {
+            Range::D5 => Some(5),
             Range::M1 => Some(22),
             Range::M3 => Some(65),
             Range::M6 => Some(125),
             Range::Y1 => Some(250),
+            Range::Y2 => Some(500),
             Range::Y3 => Some(750),
-            Range::Max => None,
+            Range::Y5 => Some(1250),
+            Range::Ytd | Range::Max => None,
         }
     }
 }
@@ -301,15 +504,21 @@ pub enum Pane {
     Macd,
     Atr,
     Stochastic,
+    Adx,
+    Cci,
+    WilliamsR,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 5] = [
+    pub const ALL: [Pane; 8] = [
         Pane::Volume,
         Pane::Rsi,
         Pane::Macd,
         Pane::Atr,
         Pane::Stochastic,
+        Pane::Adx,
+        Pane::Cci,
+        Pane::WilliamsR,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -319,6 +528,9 @@ impl Pane {
             Pane::Macd => "MACD(12,26,9)",
             Pane::Atr => "ATR(14)",
             Pane::Stochastic => "Stoch(14,3)",
+            Pane::Adx => "ADX(14) +DI/-DI",
+            Pane::Cci => "CCI(20)",
+            Pane::WilliamsR => "Williams %R(14)",
         }
     }
 }
@@ -330,6 +542,12 @@ pub struct ChartState {
     pub show_sma: bool,
     pub show_ema: bool,
     pub show_bollinger: bool,
+    /// Donchian channel — the rolling 20-session high/low envelope.
+    pub show_donchian: bool,
+    /// Ichimoku cloud plus its conversion and base lines.
+    pub show_ichimoku: bool,
+    /// Horizontal support/resistance levels clustered from swing pivots.
+    pub show_levels: bool,
     /// Draw candles rather than a close line.
     pub candles: bool,
 }
@@ -342,7 +560,36 @@ impl Default for ChartState {
             show_sma: true,
             show_ema: false,
             show_bollinger: false,
+            show_donchian: false,
+            show_ichimoku: false,
+            show_levels: false,
             candles: true,
+        }
+    }
+}
+
+/// The most symbols the Compare screen will overlay at once.
+///
+/// Four distinguishable colours is about as much as one set of axes carries
+/// before the overlay stops being readable.
+pub const MAX_COMPARE: usize = 4;
+
+/// The Compare screen's symbol set and window.
+///
+/// `symbols` empty means "not chosen yet" — the screen then seeds itself from
+/// the watchlist (see [`App::compare_symbols`]) so it is useful before the user
+/// touches it.
+#[derive(Debug)]
+pub struct CompareState {
+    pub symbols: Vec<String>,
+    pub range: Range,
+}
+
+impl Default for CompareState {
+    fn default() -> Self {
+        Self {
+            symbols: Vec::new(),
+            range: Range::Y1,
         }
     }
 }
@@ -398,12 +645,33 @@ pub struct App {
     /// Published by the dashboard renderer each frame; read by key handling.
     pub dash_layout: Cell<DashLayout>,
     pub chart: ChartState,
+    pub compare: CompareState,
     pub company_tab: CompanyTab,
     pub announcement_cursor: usize,
+
+    /// Commodity, FX and global-index context for the Macro screen.
+    pub macro_series: Vec<MacroSeries>,
+    /// Business headlines, newest first.
+    pub headlines: Vec<Headline>,
+    /// Live policy rates. `None` until the first fetch or cache read lands.
+    pub rates: Option<MacroRates>,
+    /// First headline drawn, so a long list can be scrolled on the Macro screen.
+    pub news_offset: usize,
+
+    /// Valuation rows for the symbols whose company profile is cached locally.
+    ///
+    /// Deliberately sparse: profiles are fetched per symbol on demand, so this
+    /// covers only what the user has visited plus whatever earlier sessions
+    /// left behind. The screener reports the coverage rather than presenting a
+    /// partial ranking as a complete one.
+    pub fundamentals: HashMap<String, Valuation>,
 
     pub watchlist: BTreeSet<String>,
     /// `Some` while the search prompt is open.
     pub search: Option<String>,
+    /// Restrict the screener to one sector, set by drilling through the
+    /// dashboard heatmap. Cleared with Esc.
+    pub sector_filter: Option<String>,
     pub show_help: bool,
     pub status: String,
     pub error: Option<String>,
@@ -424,6 +692,7 @@ pub struct App {
 impl App {
     pub fn new(store: Arc<Store>, tx: UnboundedSender<DataRequest>) -> Self {
         let watchlist = load_watchlist(&store);
+        let fundamentals = load_fundamentals(&store);
         Self {
             store,
             tx,
@@ -441,10 +710,17 @@ impl App {
             dashboard: DashboardState::default(),
             dash_layout: Cell::new(DashLayout::default()),
             chart: ChartState::default(),
+            compare: CompareState::default(),
             company_tab: CompanyTab::Profile,
             announcement_cursor: 0,
+            macro_series: Vec::new(),
+            headlines: Vec::new(),
+            rates: None,
+            news_offset: 0,
+            fundamentals,
             watchlist,
             search: None,
+            sector_filter: None,
             show_help: false,
             status: "Loading market data…".into(),
             error: None,
@@ -515,6 +791,12 @@ impl App {
                 }
             }
             DataEvent::Company(c) => {
+                // Every profile that lands widens the valuation view's
+                // coverage, whether or not it is the symbol on screen.
+                if !c.symbol.is_empty() {
+                    self.fundamentals
+                        .insert(c.symbol.clone(), Valuation::from_company(&c));
+                }
                 if c.symbol == self.selected {
                     self.announcement_cursor = 0;
                     self.company = Some(*c);
@@ -533,6 +815,13 @@ impl App {
             }
             DataEvent::Backfill(p) => self.backfill = Some(p),
             DataEvent::BackfillDone => self.backfill = None,
+            DataEvent::MacroSeries(series) => self.macro_series = series,
+            DataEvent::Headlines(items) => {
+                // A shorter list must not strand the viewport past its end.
+                self.headlines = items;
+                self.news_offset = self.news_offset.min(self.headlines.len().saturating_sub(1));
+            }
+            DataEvent::Rates(r) => self.rates = Some(r),
         }
     }
 
@@ -642,11 +931,34 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// The risk-free rate the risk-adjusted statistics measure against, as a
+    /// fraction.
+    ///
+    /// The live SBP policy rate when it has been fetched, otherwise the
+    /// documented fallback — never a hardcoded guess that silently ages.
+    pub fn risk_free(&self) -> f64 {
+        self.rates.unwrap_or_default().risk_free()
+    }
+
     /// Bars trimmed to the chart's selected range.
     pub fn ranged_bars(&self) -> &[Bar] {
-        match self.chart.range.sessions() {
-            Some(n) if self.bars.len() > n => &self.bars[self.bars.len() - n..],
-            _ => &self.bars,
+        Self::trim_range(&self.bars, self.chart.range)
+    }
+
+    /// Trim a bar series to `range`.
+    ///
+    /// Year-to-date is bounded by the calendar rather than a session count,
+    /// because the number of sessions so far depends on where in the year we
+    /// are — and on PSX's holiday calendar, which is not fixed.
+    pub fn trim_range(bars: &[Bar], range: Range) -> &[Bar] {
+        if range == Range::Ytd {
+            let year_start = crate::cache::year_start_ts();
+            let from = bars.partition_point(|b| b.ts < year_start);
+            return &bars[from..];
+        }
+        match range.sessions() {
+            Some(n) if bars.len() > n => &bars[bars.len() - n..],
+            _ => bars,
         }
     }
 
@@ -665,6 +977,11 @@ impl App {
             .iter()
             .filter(|q| {
                 if self.screener.watchlist_only && !self.watchlist.contains(&q.symbol) {
+                    return false;
+                }
+                if let Some(sector) = &self.sector_filter
+                    && q.sector.trim() != sector
+                {
                     return false;
                 }
                 if self.screener.equities_only
@@ -687,17 +1004,63 @@ impl App {
             .collect();
 
         let desc = self.screener.descending;
+        let sort = self.screener.sort;
         rows.sort_by(|a, b| {
-            let ord = match self.screener.sort {
-                SortKey::Symbol => a.symbol.cmp(&b.symbol),
+            // Fundamentals are cached per symbol, so most rows have no value
+            // at all for a valuation column. Those rows sink to the bottom in
+            // *both* directions: an absent P/E is not a low P/E, and letting
+            // it sort as one would put the least-known scrips at the top of an
+            // ascending ranking.
+            if sort.is_valuation() {
+                let av = self.fundamentals.get(&a.symbol).and_then(|v| v.key(sort));
+                let bv = self.fundamentals.get(&b.symbol).and_then(|v| v.key(sort));
+                return match (av, bv) {
+                    (Some(x), Some(y)) => {
+                        if desc {
+                            y.total_cmp(&x)
+                        } else {
+                            x.total_cmp(&y)
+                        }
+                    }
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => a.symbol.cmp(&b.symbol),
+                };
+            }
+
+            let ord = match sort {
                 SortKey::Price => a.current.total_cmp(&b.current),
                 SortKey::Change => a.change_pct.total_cmp(&b.change_pct),
                 SortKey::Volume => a.volume.total_cmp(&b.volume),
                 SortKey::Turnover => a.turnover().total_cmp(&b.turnover()),
+                // Symbol, and any valuation key handled above.
+                _ => a.symbol.cmp(&b.symbol),
             };
             if desc { ord.reverse() } else { ord }
         });
         rows
+    }
+
+    /// How many of the currently visible rows have cached fundamentals.
+    ///
+    /// The screener prints this beside the valuation columns so a ranking over
+    /// a handful of cached profiles is never mistaken for a ranking of the
+    /// whole market.
+    pub fn fundamentals_coverage(&self, rows: &[&Quote]) -> (usize, usize) {
+        let have = rows
+            .iter()
+            .filter(|q| self.fundamentals.contains_key(&q.symbol))
+            .count();
+        (have, rows.len())
+    }
+
+    /// Re-read every cached company profile into [`App::fundamentals`].
+    ///
+    /// Called when the valuation view is toggled: profiles land in the
+    /// background as symbols are visited, so a view opened later in the
+    /// session should see everything that has arrived since start-up.
+    pub fn reload_fundamentals(&mut self) {
+        self.fundamentals = load_fundamentals(&self.store);
     }
 
     // --- dashboard -------------------------------------------------------
@@ -721,6 +1084,79 @@ impl App {
         }
         v.truncate(n);
         v
+    }
+
+    /// Sectors ranked by traded value, with a turnover-weighted average change.
+    ///
+    /// Weighting by value stops a thin scrip printing ±10% on a handful of
+    /// shares from dominating a sector that is really flat.
+    pub fn sectors(&self) -> Vec<SectorAgg> {
+        struct Acc {
+            weighted: f64,
+            weight: f64,
+            sum: f64,
+            count: usize,
+        }
+        let mut map: BTreeMap<&str, Acc> = BTreeMap::new();
+
+        for q in &self.quotes {
+            let name = if q.sector.trim().is_empty() {
+                "UNCLASSIFIED"
+            } else {
+                q.sector.trim()
+            };
+            let acc = map.entry(name).or_insert(Acc {
+                weighted: 0.0,
+                weight: 0.0,
+                sum: 0.0,
+                count: 0,
+            });
+            acc.count += 1;
+            if q.change_pct.is_finite() {
+                acc.sum += q.change_pct;
+                let t = q.turnover();
+                if t.is_finite() && t > 0.0 {
+                    acc.weighted += q.change_pct * t;
+                    acc.weight += t;
+                }
+            }
+        }
+
+        let mut out: Vec<SectorAgg> = map
+            .into_iter()
+            .map(|(name, a)| SectorAgg {
+                name: name.to_string(),
+                avg_pct: if a.weight > 0.0 {
+                    a.weighted / a.weight
+                } else if a.count > 0 {
+                    a.sum / a.count as f64
+                } else {
+                    0.0
+                },
+                turnover: a.weight,
+                count: a.count,
+            })
+            .collect();
+
+        out.sort_by(|a, b| {
+            b.turnover
+                .total_cmp(&a.turnover)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        out
+    }
+
+    /// Record how many heatmap rows the renderer drew, so scrolling moves by
+    /// the visible window rather than a guess.
+    pub fn publish_sector_rows(&self, rows: usize) {
+        let mut l = self.dash_layout.get();
+        l.sector_rows = rows;
+        self.dash_layout.set(l);
+    }
+
+    /// The sector under the heatmap cursor.
+    pub fn sector_at_cursor(&self) -> Option<SectorAgg> {
+        self.sectors().into_iter().nth(self.dashboard.sector)
     }
 
     /// The board the dashboard cursor is on.
@@ -788,7 +1224,16 @@ impl App {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if ctrl => self.should_quit = true,
             KeyCode::Char('?') => self.show_help = true,
-            KeyCode::Esc => self.error = None,
+            KeyCode::Esc => {
+                // Clear the most specific thing first, so one key backs out of
+                // a drill-through without also dismissing an unrelated error.
+                if self.sector_filter.take().is_some() {
+                    self.screener.cursor = 0;
+                    self.status = "Sector filter cleared".into();
+                } else {
+                    self.error = None;
+                }
+            }
 
             KeyCode::Char('/') => {
                 self.search = Some(String::new());
@@ -807,9 +1252,13 @@ impl App {
 
             KeyCode::Tab => self.cycle_screen(1),
             KeyCode::BackTab => self.cycle_screen(-1),
-            KeyCode::Char(c @ '1'..='6') => {
+            // Bounds-checked against Screen::ALL rather than a hardcoded
+            // range, so adding a screen can't leave its number key dead.
+            KeyCode::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
-                self.screen = Screen::ALL[idx];
+                if let Some(screen) = Screen::ALL.get(idx) {
+                    self.screen = *screen;
+                }
             }
 
             KeyCode::Char('w') => {
@@ -835,7 +1284,35 @@ impl App {
             Screen::Screener => self.on_list_key(key),
             Screen::Chart => self.on_chart_key(key),
             Screen::Company => self.on_company_key(key),
-            Screen::Analysis | Screen::Intraday => {}
+            Screen::Macro => self.on_macro_key(key),
+            Screen::Compare => self.on_compare_key(key),
+            Screen::Analysis | Screen::Intraday | Screen::Seasonality => {}
+        }
+    }
+
+    /// Scroll the Macro screen's news list.
+    ///
+    /// Self-contained: the only state it touches is [`App::news_offset`], and
+    /// it clamps against the list length so a shrinking feed cannot leave the
+    /// viewport past the end.
+    fn on_macro_key(&mut self, key: KeyEvent) {
+        let len = self.headlines.len();
+        if len == 0 {
+            return;
+        }
+        let last = len - 1;
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.news_offset = (self.news_offset + 1).min(last)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.news_offset = self.news_offset.saturating_sub(1)
+            }
+            KeyCode::PageDown => self.news_offset = (self.news_offset + 10).min(last),
+            KeyCode::PageUp => self.news_offset = self.news_offset.saturating_sub(10),
+            KeyCode::Home | KeyCode::Char('g') => self.news_offset = 0,
+            KeyCode::End | KeyCode::Char('G') => self.news_offset = last,
+            _ => {}
         }
     }
 
@@ -845,6 +1322,19 @@ impl App {
     /// the dashboard only draws a dozen-odd rows per board, so indexing the
     /// whole market walked the cursor off-screen and the highlight vanished.
     fn on_dashboard_key(&mut self, key: KeyEvent) {
+        // `s` moves the keyboard between the leaderboards and the heatmap.
+        if key.code == KeyCode::Char('s') {
+            self.dashboard.focus = match self.dashboard.focus {
+                DashFocus::Boards => DashFocus::Sectors,
+                DashFocus::Sectors => DashFocus::Boards,
+            };
+            return;
+        }
+        if self.dashboard.focus == DashFocus::Sectors {
+            self.on_sector_key(key);
+            return;
+        }
+
         let layout = self.dash_layout.get();
         let boards = layout.count.max(1);
         let len = self.leaderboard(self.dash_board(), layout.rows).len();
@@ -916,12 +1406,34 @@ impl App {
                 return;
             }
             KeyCode::Char('s') => {
-                // Cycle the sort column.
-                let i = SortKey::ALL
+                // Cycle the sort column within whichever set of columns the
+                // current view actually draws.
+                let set: &[SortKey] = if self.screener.valuation {
+                    &SortKey::VALUATION
+                } else {
+                    &SortKey::ALL
+                };
+                let i = set
                     .iter()
                     .position(|k| *k == self.screener.sort)
                     .unwrap_or(0);
-                self.screener.sort = SortKey::ALL[(i + 1) % SortKey::ALL.len()];
+                self.screener.sort = set[(i + 1) % set.len()];
+                self.screener.cursor = 0;
+                return;
+            }
+            KeyCode::Char('f') => {
+                self.screener.valuation = !self.screener.valuation;
+                // Pick up any profile that has landed since start-up.
+                self.reload_fundamentals();
+                // Leave the sort alone unless it names a column the new view
+                // does not have.
+                if self.screener.valuation {
+                    if !SortKey::VALUATION.contains(&self.screener.sort) {
+                        self.screener.sort = SortKey::MarketCap;
+                    }
+                } else if !SortKey::ALL.contains(&self.screener.sort) {
+                    self.screener.sort = SortKey::Turnover;
+                }
                 self.screener.cursor = 0;
                 return;
             }
@@ -947,6 +1459,52 @@ impl App {
         if let Some(q) = self.visible_quotes().get(self.screener.cursor) {
             let sym = q.symbol.clone();
             self.select(sym);
+        }
+    }
+
+    /// Scroll the sector heatmap.
+    ///
+    /// The list is longer than the pane on any realistic terminal — PSX has
+    /// ~35 sectors — so the visible window follows the cursor.
+    fn on_sector_key(&mut self, key: KeyEvent) {
+        let len = self.sectors().len();
+        if len == 0 {
+            return;
+        }
+        let last = len - 1;
+        let page = self.dash_layout.get().sector_rows.max(1);
+
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.dashboard.sector = (self.dashboard.sector + 1).min(last)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.dashboard.sector = self.dashboard.sector.saturating_sub(1)
+            }
+            KeyCode::PageDown => self.dashboard.sector = (self.dashboard.sector + page).min(last),
+            KeyCode::PageUp => self.dashboard.sector = self.dashboard.sector.saturating_sub(page),
+            KeyCode::Home | KeyCode::Char('g') => self.dashboard.sector = 0,
+            KeyCode::End | KeyCode::Char('G') => self.dashboard.sector = last,
+            KeyCode::Enter => {
+                // Drill through: open the screener filtered to this sector.
+                if let Some(s) = self.sector_at_cursor() {
+                    self.search = None;
+                    self.sector_filter = Some(s.name.clone());
+                    self.screener.cursor = 0;
+                    self.screen = Screen::Screener;
+                    self.status = format!("Filtered to {}", s.name);
+                }
+                return;
+            }
+            _ => return,
+        }
+
+        // Keep the cursor inside the drawn window.
+        let rows = self.dash_layout.get().sector_rows.max(1);
+        if self.dashboard.sector < self.dashboard.sector_offset {
+            self.dashboard.sector_offset = self.dashboard.sector;
+        } else if self.dashboard.sector >= self.dashboard.sector_offset + rows {
+            self.dashboard.sector_offset = self.dashboard.sector + 1 - rows;
         }
     }
 
@@ -976,7 +1534,98 @@ impl App {
             KeyCode::Char('m') => self.chart.show_sma = !self.chart.show_sma,
             KeyCode::Char('e') => self.chart.show_ema = !self.chart.show_ema,
             KeyCode::Char('b') => self.chart.show_bollinger = !self.chart.show_bollinger,
+            KeyCode::Char('d') => self.chart.show_donchian = !self.chart.show_donchian,
+            // `k` for kumo — the Ichimoku cloud.
+            KeyCode::Char('k') => self.chart.show_ichimoku = !self.chart.show_ichimoku,
+            KeyCode::Char('v') => self.chart.show_levels = !self.chart.show_levels,
             KeyCode::Char('c') => self.chart.candles = !self.chart.candles,
+            _ => {}
+        }
+    }
+
+    /// The symbols the Compare screen overlays.
+    ///
+    /// Until the user curates a set the screen seeds itself: the selected
+    /// symbol first, then the watchlist. With neither — a fresh install — it
+    /// falls back to the day's most-traded names, so the screen has something
+    /// meaningful on it the first time it is opened.
+    pub fn compare_symbols(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let push = |out: &mut Vec<String>, s: &str| {
+            if !s.is_empty() && out.len() < MAX_COMPARE && !out.iter().any(|x| x == s) {
+                out.push(s.to_string());
+            }
+        };
+
+        if !self.compare.symbols.is_empty() {
+            for s in &self.compare.symbols {
+                push(&mut out, s);
+            }
+            return out;
+        }
+
+        push(&mut out, &self.selected);
+        for s in &self.watchlist {
+            push(&mut out, s);
+        }
+        if out.len() < 2 {
+            let mut by_value: Vec<&Quote> = self.quotes.iter().collect();
+            by_value.sort_by(|a, b| b.turnover().total_cmp(&a.turnover()));
+            for q in by_value {
+                push(&mut out, &q.symbol);
+            }
+        }
+        out
+    }
+
+    /// Compare screen: `[`/`]` cycle the window, `a` adds or removes the
+    /// selected symbol, `c` clears the set back to the watchlist seed.
+    fn on_compare_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(']') | KeyCode::Right => {
+                let i = Range::ALL
+                    .iter()
+                    .position(|r| *r == self.compare.range)
+                    .unwrap_or(0);
+                self.compare.range = Range::ALL[(i + 1) % Range::ALL.len()];
+            }
+            KeyCode::Char('[') | KeyCode::Left => {
+                let n = Range::ALL.len();
+                let i = Range::ALL
+                    .iter()
+                    .position(|r| *r == self.compare.range)
+                    .unwrap_or(0);
+                self.compare.range = Range::ALL[(i + n - 1) % n];
+            }
+            KeyCode::Char('a') => {
+                if self.selected.is_empty() {
+                    return;
+                }
+                // Editing starts from whatever is on screen, seed included, so
+                // the first keypress does not silently discard the view.
+                let mut set = self.compare_symbols();
+                let selected = self.selected.clone();
+                match set.iter().position(|s| *s == selected) {
+                    Some(i) => {
+                        set.remove(i);
+                        self.status = format!("{selected} removed from comparison");
+                    }
+                    None if set.len() < MAX_COMPARE => {
+                        set.push(selected.clone());
+                        self.status = format!("{selected} added to comparison");
+                    }
+                    None => {
+                        self.status =
+                            format!("Comparison holds {MAX_COMPARE} symbols — remove one first");
+                        return;
+                    }
+                }
+                self.compare.symbols = set;
+            }
+            KeyCode::Char('c') => {
+                self.compare.symbols.clear();
+                self.status = "Comparison reset to the watchlist".into();
+            }
             _ => {}
         }
     }
@@ -1021,6 +1670,25 @@ impl App {
 // --- watchlist persistence ----------------------------------------------
 
 const WATCHLIST_KEY: &str = "watchlist";
+
+/// How stale a cached profile may be and still feed the valuation view.
+///
+/// Far more generous than [`COMPANY_TTL_DAYS`], and deliberately so: the
+/// company screen wants today's filings, whereas a market-wide P/E ranking is
+/// better served by a month-old number than by an empty column. Fundamentals
+/// only move when results are announced, a few times a year.
+const FUNDAMENTALS_TTL_DAYS: i64 = 30;
+
+/// Read every cached company profile and reduce it to a valuation row.
+fn load_fundamentals(store: &Store) -> HashMap<String, Valuation> {
+    store
+        .companies(chrono::Duration::days(FUNDAMENTALS_TTL_DAYS))
+        .unwrap_or_default()
+        .iter()
+        .filter(|c| !c.symbol.is_empty())
+        .map(|c| (c.symbol.clone(), Valuation::from_company(c)))
+        .collect()
+}
 
 fn load_watchlist(store: &Store) -> BTreeSet<String> {
     store
@@ -1227,6 +1895,7 @@ mod tests {
             boards: [Board::Gainers, Board::Losers, Board::Active],
             count: 3,
             rows: 12,
+            sector_rows: 10,
         });
         while rx.try_recv().is_ok() {}
 
@@ -1438,6 +2107,18 @@ mod tests {
     }
 
     #[test]
+    fn every_screen_has_a_working_number_key() {
+        // Guards the case where Screen::ALL grew but the key range didn't.
+        let mut a = app();
+        for (i, expected) in Screen::ALL.iter().enumerate() {
+            let c = char::from_digit(i as u32 + 1, 10).unwrap();
+            a.screen = Screen::Dashboard;
+            a.on_key(key(c));
+            assert_eq!(a.screen, *expected, "key '{c}' should open {expected:?}");
+        }
+    }
+
+    #[test]
     fn number_keys_and_tab_switch_screens() {
         let mut a = app();
         a.on_key(key('3'));
@@ -1452,13 +2133,16 @@ mod tests {
 
     #[test]
     fn tab_cycling_wraps_in_both_directions() {
+        // Derived from Screen::ALL so adding a screen can't silently break the
+        // wrap-around assertion.
+        let last = *Screen::ALL.last().unwrap();
         let mut a = app();
-        a.screen = Screen::Intraday;
+        a.screen = last;
         a.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(a.screen, Screen::Dashboard);
 
         a.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(a.screen, Screen::Intraday);
+        assert_eq!(a.screen, last);
     }
 
     #[test]
@@ -1643,6 +2327,7 @@ mod tests {
             boards: [Board::Gainers, Board::Losers, Board::Active],
             count: 3,
             rows: 12,
+            sector_rows: 10,
         });
         a
     }
@@ -1710,6 +2395,7 @@ mod tests {
             boards: [Board::Gainers, Board::Losers, Board::Active],
             count: 3,
             rows: 12,
+            sector_rows: 10,
         });
 
         a.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
@@ -1744,6 +2430,154 @@ mod tests {
         a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(a.screen, Screen::Chart);
         assert_eq!(a.selected, expected);
+    }
+
+    /// A market spread across more sectors than the heatmap can draw.
+    fn many_sectors(visible: usize) -> App {
+        let mut a = app();
+        let quotes: Vec<Quote> = (0..30)
+            .map(|i| {
+                let mut q = quote(&format!("S{i:02}"), 10.0, i as f64 - 15.0, 1000.0);
+                q.sector = format!("SECTOR{i:02}");
+                q.volume = 1000.0 + i as f64;
+                q
+            })
+            .collect();
+        a.on_event(DataEvent::Quotes(quotes));
+        a.screener.equities_only = false;
+        a.screen = Screen::Dashboard;
+        a.dashboard.focus = DashFocus::Sectors;
+        a.publish_sector_rows(visible);
+        a
+    }
+
+    #[test]
+    fn s_toggles_focus_between_boards_and_the_heatmap() {
+        let mut a = app();
+        a.screen = Screen::Dashboard;
+        assert_eq!(a.dashboard.focus, DashFocus::Boards);
+
+        a.on_key(key('s'));
+        assert_eq!(a.dashboard.focus, DashFocus::Sectors);
+        a.on_key(key('s'));
+        assert_eq!(a.dashboard.focus, DashFocus::Boards);
+    }
+
+    #[test]
+    fn heatmap_scrolls_and_clamps_to_the_sector_count() {
+        let mut a = many_sectors(10);
+        assert_eq!(a.sectors().len(), 30);
+
+        for _ in 0..100 {
+            a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(a.dashboard.sector, 29, "must stop at the last sector");
+        assert!(a.sector_at_cursor().is_some());
+
+        for _ in 0..100 {
+            a.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+        assert_eq!(a.dashboard.sector, 0);
+        assert_eq!(a.dashboard.sector_offset, 0);
+    }
+
+    #[test]
+    fn heatmap_offset_follows_the_cursor_out_of_the_window() {
+        let mut a = many_sectors(10);
+        // Within the first window, nothing scrolls.
+        for _ in 0..9 {
+            a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(a.dashboard.sector, 9);
+        assert_eq!(a.dashboard.sector_offset, 0, "row 9 is still on screen");
+
+        // Stepping past the window edge scrolls by exactly one row.
+        a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(a.dashboard.sector, 10);
+        assert_eq!(a.dashboard.sector_offset, 1);
+
+        // And scrolls back when the cursor returns above the window.
+        for _ in 0..10 {
+            a.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+        assert_eq!(a.dashboard.sector, 0);
+        assert_eq!(a.dashboard.sector_offset, 0);
+    }
+
+    #[test]
+    fn heatmap_end_and_page_keys_keep_the_cursor_visible() {
+        let mut a = many_sectors(10);
+        a.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(a.dashboard.sector, 29);
+        let off = a.dashboard.sector_offset;
+        assert!(
+            a.dashboard.sector >= off && a.dashboard.sector < off + 10,
+            "cursor {} outside window starting {off}",
+            a.dashboard.sector
+        );
+
+        a.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(a.dashboard.sector, 19);
+        let off = a.dashboard.sector_offset;
+        assert!(a.dashboard.sector >= off && a.dashboard.sector < off + 10);
+    }
+
+    #[test]
+    fn heatmap_enter_filters_the_screener_to_that_sector() {
+        let mut a = many_sectors(10);
+        a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let target = a.sector_at_cursor().unwrap().name;
+
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.screen, Screen::Screener);
+        assert_eq!(a.sector_filter.as_deref(), Some(target.as_str()));
+
+        let rows = a.visible_quotes();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter().all(|q| q.sector == target),
+            "the screener must show only that sector"
+        );
+
+        // Esc backs out of the drill-through.
+        a.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(a.sector_filter, None);
+        assert_eq!(a.visible_quotes().len(), 30);
+    }
+
+    #[test]
+    fn heatmap_keys_are_safe_with_no_sectors() {
+        let mut a = app();
+        a.screen = Screen::Dashboard;
+        a.dashboard.focus = DashFocus::Sectors;
+        a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.dashboard.sector, 0);
+        assert_eq!(a.screen, Screen::Dashboard);
+    }
+
+    #[test]
+    fn ytd_range_is_bounded_by_the_calendar_not_a_session_count() {
+        let year_start = crate::cache::year_start_ts();
+        let bars: Vec<Bar> = (0..400)
+            .map(|i| Bar {
+                ts: year_start - 200 * 86_400 + i * 86_400,
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume: 1.0,
+            })
+            .collect();
+
+        let ytd = App::trim_range(&bars, Range::Ytd);
+        assert!(!ytd.is_empty());
+        assert!(
+            ytd.iter().all(|b| b.ts >= year_start),
+            "YTD must exclude last year's sessions"
+        );
+        assert_eq!(App::trim_range(&bars, Range::Max).len(), 400);
+        assert_eq!(App::trim_range(&bars, Range::D5).len(), 5);
     }
 
     #[test]

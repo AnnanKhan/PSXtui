@@ -4,11 +4,18 @@
 //! module only decides which columns fit and how each cell is painted. Columns
 //! are dropped in priority order as the terminal narrows, so the symbol, the
 //! last price and the day's move survive all the way down to a 20-column pane.
+//!
+//! `f` swaps the price columns for a **valuation** view — P/E, EPS, growth,
+//! margin, market cap and free float. Those come from company profiles, which
+//! PSX only serves one symbol at a time and which are therefore cached for a
+//! fraction of the board. That fraction is printed on the panel rather than
+//! papered over: a ranking of the thirty scrips someone happened to open is not
+//! a ranking of the market, and it must not be able to look like one.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
-use crate::app::{App, SortKey};
+use crate::app::{App, SortKey, Valuation};
 use crate::model::Quote;
 
 use super::theme;
@@ -30,9 +37,16 @@ enum Col {
     ChangePct,
     Volume,
     Turnover,
+    // --- valuation view ---
+    Pe,
+    Eps,
+    EpsGrowth,
+    NetMargin,
+    MarketCap,
+    FreeFloat,
 }
 
-/// Left-to-right order on screen.
+/// Left-to-right order on screen, price view.
 const DISPLAY: [Col; 12] = [
     Col::Symbol,
     Col::Name,
@@ -65,6 +79,35 @@ const PRIORITY: [Col; 12] = [
     Col::Sector,
 ];
 
+/// Left-to-right order on screen, valuation view. The last price and the day's
+/// move stay: a multiple means nothing without the price it was struck from.
+const DISPLAY_VALUATION: [Col; 10] = [
+    Col::Symbol,
+    Col::Name,
+    Col::Current,
+    Col::ChangePct,
+    Col::MarketCap,
+    Col::Pe,
+    Col::Eps,
+    Col::EpsGrowth,
+    Col::NetMargin,
+    Col::FreeFloat,
+];
+
+/// Priority for the valuation view — size and the earnings multiple first.
+const PRIORITY_VALUATION: [Col; 10] = [
+    Col::Symbol,
+    Col::MarketCap,
+    Col::Pe,
+    Col::Eps,
+    Col::EpsGrowth,
+    Col::NetMargin,
+    Col::Current,
+    Col::FreeFloat,
+    Col::ChangePct,
+    Col::Name,
+];
+
 impl Col {
     fn label(self) -> &'static str {
         match self {
@@ -80,6 +123,12 @@ impl Col {
             Col::ChangePct => "CHG%",
             Col::Volume => "VOLUME",
             Col::Turnover => "TURNOVER",
+            Col::Pe => "P/E",
+            Col::Eps => "EPS",
+            Col::EpsGrowth => "EPSG%",
+            Col::NetMargin => "MARGIN%",
+            Col::MarketCap => "MKT CAP",
+            Col::FreeFloat => "FLOAT%",
         }
     }
 
@@ -93,6 +142,9 @@ impl Col {
             Col::Current => 10,
             Col::Change | Col::ChangePct => 8,
             Col::Volume | Col::Turnover => 10,
+            Col::Pe => 7,
+            Col::Eps | Col::EpsGrowth | Col::NetMargin | Col::FreeFloat => 8,
+            Col::MarketCap => 10,
         }
     }
 
@@ -108,6 +160,12 @@ impl Col {
             Col::ChangePct => Some(SortKey::Change),
             Col::Volume => Some(SortKey::Volume),
             Col::Turnover => Some(SortKey::Turnover),
+            Col::Pe => Some(SortKey::Pe),
+            Col::Eps => Some(SortKey::Eps),
+            Col::EpsGrowth => Some(SortKey::EpsGrowth),
+            Col::NetMargin => Some(SortKey::NetMargin),
+            Col::MarketCap => Some(SortKey::MarketCap),
+            Col::FreeFloat => Some(SortKey::FreeFloat),
             _ => None,
         }
     }
@@ -115,7 +173,12 @@ impl Col {
 
 /// Pick the columns that fit `avail` cells (one cell of spacing between each)
 /// and hand any slack to the company name.
-fn choose_columns(avail: u16) -> Vec<(Col, u16)> {
+fn choose_columns(avail: u16, valuation: bool) -> Vec<(Col, u16)> {
+    let (display, priority): (&[Col], &[Col]) = if valuation {
+        (&DISPLAY_VALUATION, &PRIORITY_VALUATION)
+    } else {
+        (&DISPLAY, &PRIORITY)
+    };
     if avail == 0 {
         return Vec::new();
     }
@@ -133,14 +196,14 @@ fn choose_columns(avail: u16) -> Vec<(Col, u16)> {
 
     let mut chosen: Vec<Col> = Vec::new();
     let mut used: u16 = 0;
-    for col in PRIORITY {
+    for col in priority {
         let need = col.width() + if chosen.is_empty() { 0 } else { 1 };
         if used + need <= avail {
             used += need;
-            chosen.push(col);
+            chosen.push(*col);
         }
     }
-    let mut out: Vec<(Col, u16)> = DISPLAY
+    let mut out: Vec<(Col, u16)> = display
         .iter()
         .filter(|c| chosen.contains(c))
         .map(|c| (*c, c.width()))
@@ -195,10 +258,41 @@ fn cell_text(col: Col, q: &Quote, app: &App, width: u16) -> String {
         Col::ChangePct => theme::pct(q.change_pct),
         Col::Volume => theme::compact(q.volume),
         Col::Turnover => theme::compact(q.turnover()),
+
+        // Fundamentals. A symbol with no cached profile — most of them, most
+        // of the time — renders an em dash in every valuation cell. Nothing is
+        // inferred from the quote to fill the gap.
+        Col::Pe | Col::Eps | Col::EpsGrowth | Col::NetMargin | Col::MarketCap | Col::FreeFloat => {
+            let v = app.fundamentals.get(&q.symbol);
+            match col {
+                Col::Pe => theme::opt(v.and_then(|v| v.pe), 2),
+                Col::Eps => theme::opt(v.and_then(|v| v.eps), 2),
+                Col::EpsGrowth => opt_pct(v.and_then(|v| v.eps_growth_pct)),
+                Col::NetMargin => opt_pct(v.and_then(|v| v.net_margin_pct)),
+                // `market_cap` is already in PKR: App converts from the
+                // thousands PSX publishes exactly once, at the source.
+                Col::MarketCap => match v.and_then(|v| v.market_cap) {
+                    Some(m) => theme::compact(m),
+                    None => "—".into(),
+                },
+                _ => match v.and_then(|v| v.free_float_pct) {
+                    Some(p) => theme::pct_plain(p),
+                    None => "—".into(),
+                },
+            }
+        }
     }
 }
 
-fn cell_style(col: Col, q: &Quote) -> Style {
+/// A signed percentage that may be missing.
+fn opt_pct(v: Option<f64>) -> String {
+    match v {
+        Some(v) if v.is_finite() => theme::pct(v),
+        _ => "—".into(),
+    }
+}
+
+fn cell_style(col: Col, q: &Quote, val: Option<&Valuation>) -> Style {
     match col {
         Col::Symbol => Style::new().fg(theme::FG).bold(),
         Col::Name | Col::Sector => Style::new().fg(theme::MUTED),
@@ -208,6 +302,26 @@ fn cell_style(col: Col, q: &Quote) -> Style {
         Col::Current => Style::new().fg(theme::FG),
         Col::Change | Col::ChangePct => Style::new().fg(theme::change_color(q.change_pct)),
         Col::Volume | Col::Turnover => Style::new().fg(theme::VOLUME),
+
+        // Growth and margin are signed, so they carry the up/down hue; the
+        // rest are plain. A missing value stays dim so the eye reads the gap
+        // as absence rather than as a number worth comparing.
+        Col::EpsGrowth => signed_style(val.and_then(|v| v.eps_growth_pct)),
+        Col::NetMargin => signed_style(val.and_then(|v| v.net_margin_pct)),
+        Col::Pe | Col::Eps | Col::MarketCap | Col::FreeFloat => {
+            if val.is_some() {
+                Style::new().fg(theme::FG)
+            } else {
+                Style::new().fg(theme::DIM)
+            }
+        }
+    }
+}
+
+fn signed_style(v: Option<f64>) -> Style {
+    match v {
+        Some(v) if v.is_finite() => Style::new().fg(theme::change_color(v)),
+        _ => Style::new().fg(theme::DIM),
     }
 }
 
@@ -218,15 +332,28 @@ fn to_cell(text: String, style: Style, numeric: bool) -> Cell<'static> {
 
 // --- summary lines -------------------------------------------------------
 
-fn title(shown: usize, total: usize) -> String {
-    format!("Screener  {shown}/{total}")
+fn title(shown: usize, total: usize, valuation: bool) -> String {
+    if valuation {
+        format!("Valuation  {shown}/{total}")
+    } else {
+        format!("Screener  {shown}/{total}")
+    }
+}
+
+/// How the valuation view states its own incompleteness.
+///
+/// This is the whole point of the readout: `34/483` says plainly that the
+/// ranking below covers 34 of the 483 visible symbols, because company
+/// profiles are fetched on demand and most have never been opened.
+fn coverage(have: usize, shown: usize) -> String {
+    format!("fundamentals: {have}/{shown} cached")
 }
 
 /// The compact filter + sort readout hung off the bottom border.
 ///
 /// Groups are appended only while they fit in `max` cells, so the readout never
 /// eats into the border on a narrow pane.
-fn footer(app: &App, max: usize) -> Line<'static> {
+fn footer(app: &App, coverage_of: Option<(usize, usize)>, max: usize) -> Line<'static> {
     let flag = |on: bool| {
         if on {
             Style::new().fg(theme::WARN).bold()
@@ -236,7 +363,22 @@ fn footer(app: &App, max: usize) -> Line<'static> {
     };
 
     // (text, style) groups in descending order of importance.
-    let mut groups: Vec<Vec<(String, Style)>> = vec![vec![
+    let mut groups: Vec<Vec<(String, Style)>> = Vec::new();
+
+    // Coverage leads, ahead of even the sort readout: on a pane too narrow for
+    // everything, the caveat is the last thing that should be dropped.
+    if let Some((have, shown)) = coverage_of {
+        groups.push(vec![(
+            format!(" {} ", coverage(have, shown)),
+            if have < shown {
+                Style::new().fg(theme::WARN).bold()
+            } else {
+                Style::new().fg(theme::ACCENT)
+            },
+        )]);
+    }
+
+    groups.push(vec![
         (" sort ".into(), theme::label_style()),
         (
             format!(
@@ -250,7 +392,7 @@ fn footer(app: &App, max: usize) -> Line<'static> {
             ),
             Style::new().fg(theme::ACCENT),
         ),
-    ]];
+    ]);
 
     if let Some(q) = app.search.as_ref().filter(|q| !q.is_empty()) {
         groups.push(vec![
@@ -310,9 +452,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let rows = app.visible_quotes();
-    let heading = title(rows.len(), app.quotes.len());
-    let block = widgets::panel(&heading)
-        .title_bottom(footer(app, area.width.saturating_sub(2) as usize).right_aligned());
+    let valuation = app.screener.valuation;
+    let heading = title(rows.len(), app.quotes.len(), valuation);
+    // Only the valuation view makes a claim it has to qualify.
+    let coverage_of = valuation.then(|| app.fundamentals_coverage(&rows));
+    let block = widgets::panel(&heading).title_bottom(
+        footer(app, coverage_of, area.width.saturating_sub(2) as usize).right_aligned(),
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -327,7 +473,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let cols = choose_columns(inner.width);
+    let cols = choose_columns(inner.width, valuation);
     if cols.is_empty() {
         return;
     }
@@ -352,13 +498,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let body: Vec<Row> = rows
         .iter()
         .map(|q| {
+            let val = app.fundamentals.get(&q.symbol);
             Row::new(
                 cols.iter()
                     .map(|(c, w)| {
                         let style = if *c == Col::Symbol && app.watchlist.contains(&q.symbol) {
                             Style::new().fg(theme::WARN).bold()
                         } else {
-                            cell_style(*c, q)
+                            cell_style(*c, q, val)
                         };
                         to_cell(cell_text(*c, q, app, *w), style, c.numeric())
                     })
@@ -395,7 +542,7 @@ mod tests {
     use super::*;
     use crate::app::{DataEvent, detached_channel};
     use crate::cache::Store;
-    use crate::model::SymbolInfo;
+    use crate::model::{Company, FinancialPeriod, RatioPeriod, SymbolInfo};
 
     fn quote(symbol: &str, price: f64, pct: f64, volume: f64) -> Quote {
         Quote {
@@ -423,7 +570,7 @@ mod tests {
 
     #[test]
     fn narrow_panes_keep_the_identity_and_the_move() {
-        let cols = choose_columns(24);
+        let cols = choose_columns(24, false);
         let names: Vec<Col> = cols.iter().map(|(c, _)| *c).collect();
         assert!(names.contains(&Col::Symbol));
         assert!(names.contains(&Col::ChangePct));
@@ -433,16 +580,16 @@ mod tests {
     #[test]
     fn columns_never_exceed_the_available_width() {
         for avail in 1u16..250 {
-            let cols = choose_columns(avail);
+            let cols = choose_columns(avail, false);
             let total: u16 = cols.iter().map(|(_, w)| *w).sum::<u16>() + (cols.len() as u16 - 1);
             assert!(total <= avail, "avail {avail} overflowed to {total}");
         }
-        assert!(choose_columns(0).is_empty());
+        assert!(choose_columns(0, false).is_empty());
     }
 
     #[test]
     fn slack_is_given_to_the_company_name() {
-        let cols = choose_columns(200);
+        let cols = choose_columns(200, false);
         let (_, name_w) = cols.iter().find(|(c, _)| *c == Col::Name).unwrap();
         assert!(
             *name_w > Col::Name.width(),
@@ -454,7 +601,7 @@ mod tests {
 
     #[test]
     fn every_column_is_present_on_a_wide_pane() {
-        let cols = choose_columns(200);
+        let cols = choose_columns(200, false);
         assert_eq!(cols.len(), DISPLAY.len());
         let order: Vec<Col> = cols.iter().map(|(c, _)| *c).collect();
         assert_eq!(order, DISPLAY.to_vec(), "display order must be preserved");
@@ -462,8 +609,8 @@ mod tests {
 
     #[test]
     fn a_single_cell_pane_still_yields_a_symbol_column() {
-        assert_eq!(choose_columns(3), vec![(Col::Symbol, 3)]);
-        assert!(choose_columns(0).is_empty());
+        assert_eq!(choose_columns(3, false), vec![(Col::Symbol, 3)]);
+        assert!(choose_columns(0, false).is_empty());
     }
 
     #[test]
@@ -603,7 +750,7 @@ mod tests {
     }
 
     fn footer_text(app: &App, max: usize) -> String {
-        footer(app, max)
+        footer(app, None, max)
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -635,6 +782,156 @@ mod tests {
 
     #[test]
     fn the_title_counts_shown_versus_total() {
-        assert_eq!(title(12, 500), "Screener  12/500");
+        assert_eq!(title(12, 500, false), "Screener  12/500");
+        assert_eq!(title(12, 500, true), "Valuation  12/500");
+    }
+
+    // --- valuation view ---------------------------------------------------
+
+    /// A company with the fundamentals the valuation view reads.
+    fn company(symbol: &str) -> Company {
+        Company {
+            symbol: symbol.into(),
+            name: format!("{symbol} Limited"),
+            // 1.5 million *thousands* of PKR — 1.5 billion rupees.
+            market_cap_000: Some(1_500_000.0),
+            shares: Some(1_000_000.0),
+            free_float: Some(400_000.0),
+            pe_ratio: Some(6.25),
+            financials_annual: vec![
+                FinancialPeriod {
+                    period: "2025".into(),
+                    rows: vec![("EPS".into(), 42.60)],
+                },
+                FinancialPeriod {
+                    period: "2024".into(),
+                    rows: vec![("EPS".into(), 38.70)],
+                },
+            ],
+            ratios: vec![RatioPeriod {
+                period: "2025".into(),
+                rows: vec![
+                    ("Net Profit Margin (%)".into(), 9.84),
+                    ("EPS Growth (%)".into(), 10.08),
+                ],
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn valuation_app() -> App {
+        let mut a = app_with(vec![
+            quote("HBL", 292.0, 1.0, 1000.0),
+            quote("OGDC", 200.0, -1.0, 500.0),
+        ]);
+        a.screener.valuation = true;
+        a.selected = "HBL".into();
+        a.on_event(DataEvent::Company(Box::new(company("HBL"))));
+        a
+    }
+
+    #[test]
+    fn the_valuation_view_swaps_in_the_fundamentals_columns() {
+        let cols: Vec<Col> = choose_columns(200, true).iter().map(|(c, _)| *c).collect();
+        assert_eq!(cols, DISPLAY_VALUATION.to_vec());
+        assert!(!cols.contains(&Col::Turnover), "liquidity is not valuation");
+
+        // And the width negotiation still holds.
+        for avail in 1u16..250 {
+            let cols = choose_columns(avail, true);
+            let total: u16 = cols.iter().map(|(_, w)| *w).sum::<u16>() + (cols.len() as u16 - 1);
+            assert!(total <= avail, "avail {avail} overflowed to {total}");
+        }
+    }
+
+    #[test]
+    fn valuation_cells_render_the_cached_fundamentals() {
+        let app = valuation_app();
+        let q = app.quotes.iter().find(|q| q.symbol == "HBL").unwrap();
+        assert_eq!(cell_text(Col::Pe, q, &app, 7), "6.25");
+        assert_eq!(cell_text(Col::Eps, q, &app, 8), "42.60");
+        assert_eq!(cell_text(Col::EpsGrowth, q, &app, 8), "+10.08%");
+        assert_eq!(cell_text(Col::NetMargin, q, &app, 8), "+9.84%");
+        // 1,500,000 thousands of PKR is 1.5 billion rupees, not 1.5 million.
+        assert_eq!(cell_text(Col::MarketCap, q, &app, 10), "1.50B");
+        assert_eq!(cell_text(Col::FreeFloat, q, &app, 8), "40.00%");
+    }
+
+    #[test]
+    fn symbols_without_a_cached_profile_show_a_dash_not_a_zero() {
+        let app = valuation_app();
+        let q = app.quotes.iter().find(|q| q.symbol == "OGDC").unwrap();
+        for col in [
+            Col::Pe,
+            Col::Eps,
+            Col::EpsGrowth,
+            Col::NetMargin,
+            Col::MarketCap,
+            Col::FreeFloat,
+        ] {
+            assert_eq!(
+                cell_text(col, q, &app, 10),
+                "—",
+                "{col:?} must not invent a value"
+            );
+        }
+    }
+
+    #[test]
+    fn the_footer_admits_how_little_of_the_board_is_covered() {
+        let app = valuation_app();
+        let rows = app.visible_quotes();
+        let (have, shown) = app.fundamentals_coverage(&rows);
+        assert_eq!((have, shown), (1, 2));
+
+        let text = footer_text_with(&app, Some((have, shown)), 80);
+        assert!(
+            text.contains("fundamentals: 1/2 cached"),
+            "the coverage caveat must be on screen: {text:?}"
+        );
+
+        // On a pane too narrow for everything, the caveat is what survives.
+        let narrow = footer_text_with(&app, Some((have, shown)), 28);
+        assert!(narrow.contains("fundamentals: 1/2"), "got {narrow:?}");
+        assert!(narrow.chars().count() <= 28);
+    }
+
+    fn footer_text_with(app: &App, coverage_of: Option<(usize, usize)>, max: usize) -> String {
+        footer(app, coverage_of, max)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn rows_without_fundamentals_sort_to_the_bottom_either_way() {
+        let mut app = valuation_app();
+        app.screener.sort = SortKey::Pe;
+        for descending in [true, false] {
+            app.screener.descending = descending;
+            let rows = app.visible_quotes();
+            assert_eq!(
+                rows[0].symbol, "HBL",
+                "an absent P/E must never outrank a known one (desc={descending})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_valuation_view_renders_at_tiny_sizes() {
+        let app = valuation_app();
+        for (w, h) in [(20u16, 10u16), (20, 2), (3, 3), (1, 1), (5, 40), (80, 1)] {
+            let buf = render(&app, w, h);
+            assert_eq!(buf.area.height, h);
+        }
+        let text = text_of(&render(&app, 120, 20));
+        assert!(text.contains("MKT CAP"));
+        assert!(text.contains("P/E"));
+        assert!(text.contains("fundamentals: 1/2 cached"));
+        assert!(
+            !text.to_lowercase().contains("nan"),
+            "no poisoned float may reach the screen"
+        );
     }
 }

@@ -8,12 +8,10 @@
 //! order and whole blocks disappear rather than being rendered as a stump, so
 //! the screen stays readable from 20x10 up to a full-screen terminal.
 
-use std::collections::BTreeMap;
-
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::app::{App, Board, DashLayout};
+use crate::app::{App, Board, DashFocus, DashLayout, SectorAgg};
 use crate::model::Quote;
 
 use super::theme;
@@ -431,6 +429,7 @@ fn draw_lists(f: &mut Frame, area: Rect, app: &App) {
         boards: [Board::Gainers, Board::Losers, Board::Active],
         count: boards.len(),
         rows: cap,
+        sector_rows: app.dash_layout.get().sector_rows,
     };
     for (i, b) in boards.iter().enumerate() {
         published.boards[i] = *b;
@@ -459,74 +458,7 @@ fn draw_lists(f: &mut Frame, area: Rect, app: &App) {
 
 // --- sector heatmap ------------------------------------------------------
 
-/// One sector's aggregate for the heatmap.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SectorAgg {
-    pub name: String,
-    /// Turnover-weighted average change %, falling back to a plain mean when
-    /// nothing in the sector traded.
-    pub avg_pct: f64,
-    pub turnover: f64,
-    pub count: usize,
-}
-
-fn sector_aggregates(quotes: &[Quote]) -> Vec<SectorAgg> {
-    struct Acc {
-        weighted: f64,
-        weight: f64,
-        sum: f64,
-        count: usize,
-    }
-    let mut map: BTreeMap<&str, Acc> = BTreeMap::new();
-
-    for q in quotes {
-        let name = if q.sector.trim().is_empty() {
-            "UNCLASSIFIED"
-        } else {
-            q.sector.trim()
-        };
-        let acc = map.entry(name).or_insert(Acc {
-            weighted: 0.0,
-            weight: 0.0,
-            sum: 0.0,
-            count: 0,
-        });
-        acc.count += 1;
-        if q.change_pct.is_finite() {
-            acc.sum += q.change_pct;
-            let t = q.turnover();
-            if t.is_finite() && t > 0.0 {
-                acc.weighted += q.change_pct * t;
-                acc.weight += t;
-            }
-        }
-    }
-
-    let mut out: Vec<SectorAgg> = map
-        .into_iter()
-        .map(|(name, a)| SectorAgg {
-            name: name.to_string(),
-            avg_pct: if a.weight > 0.0 {
-                a.weighted / a.weight
-            } else if a.count > 0 {
-                a.sum / a.count as f64
-            } else {
-                0.0
-            },
-            turnover: a.weight,
-            count: a.count,
-        })
-        .collect();
-
-    out.sort_by(|a, b| {
-        b.turnover
-            .total_cmp(&a.turnover)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    out
-}
-
-fn sector_line(s: &SectorAgg, width: usize) -> Line<'static> {
+fn sector_line(s: &SectorAgg, width: usize, selected: bool) -> Line<'static> {
     let bg = widgets::heat_color(s.avg_pct, 5.0);
     // Above roughly half saturation the background is bright enough that white
     // text reads better than the muted foreground.
@@ -536,47 +468,80 @@ fn sector_line(s: &SectorAgg, width: usize) -> Line<'static> {
         theme::MUTED
     };
 
+    // The cursor row is marked with a rule in its own column, so the marker
+    // never overwrites the sector name. The content is laid out one column
+    // narrower to pay for it, keeping every row exactly `width` wide.
+    let marker_w = usize::from(selected);
+    let content_w = width.saturating_sub(marker_w);
+
     let pct_w = 8usize;
     let cnt_w = 4usize;
-    if width <= pct_w + 2 {
-        return Line::from(Span::styled(
-            format!("{:<width$}", theme::truncate(&s.name, width), width = width),
-            Style::new().bg(bg).fg(fg),
-        ));
-    }
+    let text = if content_w <= pct_w + 2 {
+        format!(
+            "{:<width$}",
+            theme::truncate(&s.name, content_w),
+            width = content_w
+        )
+    } else {
+        let show_count = content_w >= pct_w + cnt_w + 8;
+        let name_w = content_w - pct_w - if show_count { cnt_w } else { 0 };
+        let mut t = format!(
+            "{:<name_w$}{:>pct_w$}",
+            theme::truncate(&s.name, name_w),
+            theme::pct(s.avg_pct),
+            name_w = name_w,
+            pct_w = pct_w
+        );
+        if show_count {
+            t.push_str(&format!("{:>cnt_w$}", s.count, cnt_w = cnt_w));
+        }
+        t
+    };
 
-    let show_count = width >= pct_w + cnt_w + 8;
-    let name_w = width - pct_w - if show_count { cnt_w } else { 0 };
-    let mut text = format!(
-        "{:<name_w$}{:>pct_w$}",
-        theme::truncate(&s.name, name_w),
-        theme::pct(s.avg_pct),
-        name_w = name_w,
-        pct_w = pct_w
-    );
-    if show_count {
-        text.push_str(&format!("{:>cnt_w$}", s.count, cnt_w = cnt_w));
+    if selected {
+        return Line::from(vec![
+            Span::styled("▌", Style::new().fg(theme::ACCENT).bg(bg)),
+            Span::styled(text, Style::new().bg(bg).fg(theme::FG).bold()),
+        ]);
     }
-
     Line::from(Span::styled(text, Style::new().bg(bg).fg(fg).bold()))
 }
 
 fn draw_sectors(f: &mut Frame, area: Rect, app: &App) {
-    let block = widgets::panel("Sectors — turnover-weighted change");
+    let sectors = app.sectors();
+    let focused = app.dashboard.focus == DashFocus::Sectors;
+
+    // Signal focus in the title, and say how to get there when it isn't.
+    let title = if focused {
+        format!(
+            "Sectors — turnover-weighted change  [{}/{}]  Enter filters · s back",
+            (app.dashboard.sector + 1).min(sectors.len().max(1)),
+            sectors.len()
+        )
+    } else {
+        format!(
+            "Sectors — turnover-weighted change  ({} · s to scroll)",
+            sectors.len()
+        )
+    };
+    let block = widgets::panel(&title).border_style(if focused {
+        Style::new().fg(theme::ACCENT)
+    } else {
+        theme::border_style()
+    });
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
         return;
     }
 
-    let sectors = sector_aggregates(&app.quotes);
     if sectors.is_empty() {
+        app.publish_sector_rows(0);
         f.render_widget(Paragraph::new(widgets::placeholder("no sectors")), inner);
         return;
     }
 
-    // Two columns once there is room, so the tail of the sector list is visible
-    // without scrolling.
+    // Two columns once there is room, so more of the list is visible at once.
     let cols = if inner.width >= 72 { 2 } else { 1 };
     let col_areas: Vec<Rect> = if cols == 2 {
         Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
@@ -587,21 +552,62 @@ fn draw_sectors(f: &mut Frame, area: Rect, app: &App) {
         vec![inner]
     };
 
-    let per = inner.height as usize;
+    let per_col = inner.height as usize;
+    let visible = per_col * cols;
+    // Publish the window size so key handling scrolls by the right amount and
+    // can keep the cursor on a row that is actually drawn.
+    app.publish_sector_rows(visible);
+
+    // Clamp the offset here too: the pane can shrink on a resize after the
+    // offset was set against a taller one.
+    let max_offset = sectors.len().saturating_sub(visible);
+    let offset = app.dashboard.sector_offset.min(max_offset);
+
     for (i, col) in col_areas.iter().enumerate() {
         if col.width == 0 || col.height == 0 {
             continue;
         }
-        let start = i * per;
+        let start = offset + i * per_col;
         if start >= sectors.len() {
             break;
         }
-        let end = (start + per).min(sectors.len());
+        let end = (start + per_col).min(sectors.len());
         let lines: Vec<Line> = sectors[start..end]
             .iter()
-            .map(|s| sector_line(s, col.width as usize))
+            .enumerate()
+            .map(|(row, s)| {
+                let selected = focused && start + row == app.dashboard.sector;
+                sector_line(s, col.width as usize, selected)
+            })
             .collect();
         f.render_widget(Paragraph::new(lines), *col);
+    }
+
+    // Scroll affordance: show that there is more above or below.
+    if sectors.len() > visible && inner.width > 2 {
+        let mut marks = Vec::new();
+        if offset > 0 {
+            marks.push("▲");
+        }
+        if offset + visible < sectors.len() {
+            marks.push("▼");
+        }
+        if !marks.is_empty() {
+            let y = inner.y + inner.height.saturating_sub(1);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    marks.join(" "),
+                    Style::new().fg(theme::ACCENT),
+                )))
+                .alignment(Alignment::Right),
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                },
+            );
+        }
     }
 }
 
@@ -705,12 +711,13 @@ mod tests {
 
     #[test]
     fn sectors_are_turnover_weighted_and_ranked_by_value() {
-        let s = sector_aggregates(&[
+        let s = app_with(vec![
             // BANKS: a big +10% name and a tiny -10% name.
             quote("BIG", "BANKS", 100.0, 10.0, 1000.0),
             quote("TINY", "BANKS", 1.0, -10.0, 1.0),
             quote("OIL1", "OIL", 50.0, -2.0, 10.0),
-        ]);
+        ])
+        .sectors();
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].name, "BANKS", "biggest sector by turnover reads first");
         assert_eq!(s[0].count, 2);
@@ -724,10 +731,11 @@ mod tests {
 
     #[test]
     fn untraded_sector_falls_back_to_a_plain_mean() {
-        let s = sector_aggregates(&[
+        let s = app_with(vec![
             quote("A", "CEMENT", 10.0, 4.0, 0.0),
             quote("B", "CEMENT", 10.0, -2.0, 0.0),
-        ]);
+        ])
+        .sectors();
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].turnover, 0.0);
         assert!((s[0].avg_pct - 1.0).abs() < 1e-9);
@@ -735,13 +743,13 @@ mod tests {
 
     #[test]
     fn blank_sectors_are_bucketed_as_unclassified() {
-        let s = sector_aggregates(&[quote("A", "  ", 10.0, 1.0, 5.0)]);
+        let s = app_with(vec![quote("A", "  ", 10.0, 1.0, 5.0)]).sectors();
         assert_eq!(s[0].name, "UNCLASSIFIED");
     }
 
     #[test]
     fn empty_quotes_produce_no_sectors() {
-        assert!(sector_aggregates(&[]).is_empty());
+        assert!(app_with(vec![]).sectors().is_empty());
     }
 
     #[test]
@@ -781,7 +789,37 @@ mod tests {
             count: 21,
         };
         for w in [2usize, 8, 12, 24, 40, 90] {
-            assert_eq!(sector_line(&s, w).width(), w);
+            assert_eq!(sector_line(&s, w, false).width(), w);
+            assert_eq!(
+                sector_line(&s, w, true).width(),
+                w,
+                "the selected row must keep the same width"
+            );
+            // The cursor marker gets its own column and must not eat the name.
+            let lit: String = sector_line(&s, w, true)
+                .spans
+                .iter()
+                .map(|sp| sp.content.as_ref())
+                .collect();
+            let plain: String = sector_line(&s, w, false)
+                .spans
+                .iter()
+                .map(|sp| sp.content.as_ref())
+                .collect();
+            if w >= 12 {
+                // The marker costs one column, so the name may truncate one
+                // char earlier — but it must never *lose its first letters*,
+                // which is what happened when the marker overwrote them.
+                // Compare by chars: a truncated name ends in a multi-byte
+                // ellipsis that byte-slicing would split.
+                let head =
+                    |s: &str| -> String { s.trim_start_matches('▌').chars().take(2).collect() };
+                assert_eq!(
+                    head(&lit),
+                    head(&plain),
+                    "selected row lost the start of the name: {lit:?} vs {plain:?}"
+                );
+            }
         }
     }
 

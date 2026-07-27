@@ -35,6 +35,12 @@ pub fn trading_day(ts: i64) -> String {
         .to_string()
 }
 
+/// Timestamp of 1 January this year, in PKT — the cut-off for year-to-date.
+pub fn year_start_ts() -> i64 {
+    let year = Utc::now().with_timezone(&pkt()).format("%Y").to_string();
+    day_close_ts(&format!("{year}-01-01")) - 16 * 3600
+}
+
 /// Timestamp for a trading day's close (16:00 PKT), matching the EOD feed's
 /// own convention so merged bars sort consistently.
 pub fn day_close_ts(day: &str) -> i64 {
@@ -111,6 +117,15 @@ impl Store {
 
             CREATE TABLE IF NOT EXISTS quotes (
                 symbol      TEXT PRIMARY KEY,
+                json        TEXT NOT NULL,
+                fetched_at  INTEGER NOT NULL
+            );
+
+            -- External market context (commodities, headlines, policy rate).
+            -- One JSON blob per kind, so the Macro screen opens instantly and
+            -- offline, exactly like the cached quote board.
+            CREATE TABLE IF NOT EXISTS external (
+                key         TEXT PRIMARY KEY,
                 json        TEXT NOT NULL,
                 fetched_at  INTEGER NOT NULL
             );
@@ -408,6 +423,72 @@ impl Store {
             return Ok(None);
         }
         Ok(serde_json::from_str(&json).ok())
+    }
+
+    // --- external context ------------------------------------------------
+
+    /// Store an external-context payload under `key` as a JSON blob.
+    ///
+    /// Generic because the three payloads — commodity series, headlines, policy
+    /// rates — have nothing in common but their lifecycle, and a table per kind
+    /// would be three schemas for one access pattern.
+    pub fn put_external<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO external (key, json, fetched_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                json = excluded.json, fetched_at = excluded.fetched_at",
+            params![key, serde_json::to_string(value)?, Utc::now().timestamp()],
+        )?;
+        Ok(())
+    }
+
+    /// Read an external-context payload. A blob that no longer deserialises —
+    /// after a shape change — reads as absent rather than as an error.
+    pub fn external<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        let conn = self.conn.lock().unwrap();
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT json FROM external WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// When `key` was last written, as a Unix timestamp.
+    pub fn external_fetched_at(&self, key: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT fetched_at FROM external WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every cached company profile no older than `max_age`.
+    ///
+    /// Profiles are fetched one symbol at a time, on demand, so this returns
+    /// whatever the user happens to have visited — a fraction of the market,
+    /// not a survey of it. Callers that rank on the result are responsible for
+    /// saying how much of the board it actually covers.
+    ///
+    /// Rows that fail to deserialise (a schema change against an old cache)
+    /// are skipped rather than failing the whole read.
+    pub fn companies(&self, max_age: Duration) -> Result<Vec<Company>> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = Utc::now().timestamp() - max_age.num_seconds();
+        let mut stmt = conn.prepare("SELECT json FROM companies WHERE fetched_at >= ?1")?;
+        let rows: Vec<String> = stmt
+            .query_map(params![cutoff], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows
+            .iter()
+            .filter_map(|j| serde_json::from_str(j).ok())
+            .collect())
     }
 
     // --- meta ------------------------------------------------------------

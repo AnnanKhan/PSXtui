@@ -23,6 +23,13 @@ const AXIS_WIDTH: u16 = 11;
 /// Rows reserved for the lower indicator pane.
 const PANE_HEIGHT: u16 = 9;
 
+/// Donchian channel lookback, in sessions.
+const DONCHIAN_PERIOD: usize = 20;
+/// Ichimoku conversion / base / span-B windows — the standard 9, 26, 52.
+const ICHIMOKU: (usize, usize, usize) = (9, 26, 52);
+/// How near two swing pivots must be to count as the same level: 1%.
+const LEVEL_SENSITIVITY: f64 = 0.01;
+
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let bars = app.ranged_bars();
 
@@ -132,6 +139,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         (app.chart.show_sma, "SMA20"),
         (app.chart.show_ema, "EMA50"),
         (app.chart.show_bollinger, "BB20"),
+        (app.chart.show_donchian, "DC20"),
+        (app.chart.show_ichimoku, "ICHI"),
+        (app.chart.show_levels, "S/R"),
     ] {
         ranges.push(Span::styled(
             format!("{label} "),
@@ -185,6 +195,36 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         let b = indicators::bollinger(&closes, 20, 2.0);
         (sample(&b.upper, &buckets), sample(&b.lower, &buckets))
     });
+    let donchian = app.chart.show_donchian.then(|| {
+        let d = indicators::donchian(bars, DONCHIAN_PERIOD);
+        (
+            sample(&d.upper, &buckets),
+            sample(&d.middle, &buckets),
+            sample(&d.lower, &buckets),
+        )
+    });
+    // The Ichimoku spans are returned unshifted (see `indicators::ichimoku`);
+    // the conventional 26-session forward projection is applied here, on the
+    // *daily* series, before sampling — so the cloud lands on the right session
+    // at every zoom level. The last 26 values project past the final bar and
+    // have nowhere to go on an axis that ends there, so they are dropped.
+    let ichimoku = app.chart.show_ichimoku.then(|| {
+        let (conv, base, span_b) = ICHIMOKU;
+        let i = indicators::ichimoku(bars, conv, base, span_b);
+        IchimokuPlot {
+            conversion: sample(&i.conversion, &buckets),
+            base: sample(&i.base, &buckets),
+            span_a: sample(&shift_forward(&i.span_a, base), &buckets),
+            span_b: sample(&shift_forward(&i.span_b, base), &buckets),
+        }
+    });
+    // Levels come from the visible window, so they answer "what has this scrip
+    // reacted to over the range I am looking at" rather than over all history.
+    let levels = if app.chart.show_levels {
+        indicators::support_resistance(bars, bars.len(), LEVEL_SENSITIVITY)
+    } else {
+        Vec::new()
+    };
 
     // Bound the y-axis by everything actually drawn, not just the candles.
     let mut lo = f64::MAX;
@@ -205,6 +245,18 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
             hi = hi.max(*v);
         }
     }
+    if let Some((upper, _, lower)) = &donchian {
+        for v in upper.iter().chain(lower.iter()).flatten() {
+            lo = lo.min(*v);
+            hi = hi.max(*v);
+        }
+    }
+    if let Some(i) = &ichimoku {
+        for v in i.span_a.iter().chain(i.span_b.iter()).flatten() {
+            lo = lo.min(*v);
+            hi = hi.max(*v);
+        }
+    }
     let (lo, hi) = pad_bounds(lo, hi);
 
     draw_price_axis(f, axis_area, lo, hi);
@@ -217,6 +269,26 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         .x_bounds([0.0, candles_ref.len().max(1) as f64])
         .y_bounds([lo, hi])
         .paint(move |ctx| {
+            // Levels first, so the candles paint over them: the price action
+            // is the subject, the level is the backdrop.
+            for level in &levels {
+                if level.price < lo || level.price > hi {
+                    continue;
+                }
+                let color = if level.is_support {
+                    theme::UP
+                } else {
+                    theme::DOWN
+                };
+                ctx.draw(&CanvasLine {
+                    x1: 0.0,
+                    y1: level.price,
+                    x2: candles_ref.len() as f64,
+                    y2: level.price,
+                    color,
+                });
+            }
+
             if draw_candles {
                 for (i, c) in candles_ref.iter().enumerate() {
                     let x = i as f64 + 0.5;
@@ -265,10 +337,66 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
                 draw_overlay(ctx, upper, theme::VOLUME);
                 draw_overlay(ctx, lower, theme::VOLUME);
             }
+            if let Some((upper, middle, lower)) = &donchian {
+                draw_overlay(ctx, upper, theme::UP);
+                draw_overlay(ctx, lower, theme::DOWN);
+                draw_overlay(ctx, middle, theme::DIM);
+            }
+            if let Some(i) = &ichimoku {
+                // A terminal canvas cannot shade the cloud, so its two edges
+                // carry the colour instead: span A above span B is a bullish
+                // cloud, below it a bearish one.
+                draw_overlay(ctx, &i.span_a, theme::UP);
+                draw_overlay(ctx, &i.span_b, theme::DOWN);
+                draw_overlay(ctx, &i.conversion, theme::ACCENT);
+                draw_overlay(ctx, &i.base, theme::WARN);
+            }
+
+            // Level labels last: a price written under a candle is unreadable,
+            // and the label is what makes the line actionable.
+            for level in &levels {
+                if level.price < lo || level.price > hi {
+                    continue;
+                }
+                let color = if level.is_support {
+                    theme::UP
+                } else {
+                    theme::DOWN
+                };
+                ctx.print(
+                    0.0,
+                    level.price,
+                    Line::styled(theme::price(level.price), Style::new().fg(color)),
+                );
+            }
         });
 
     f.render_widget(canvas, plot_area);
     draw_date_labels(f, plot_area, bars, &buckets);
+}
+
+/// The four Ichimoku lines the price canvas draws, already sampled per column
+/// and with the spans' forward shift applied.
+struct IchimokuPlot {
+    conversion: Vec<Option<f64>>,
+    base: Vec<Option<f64>>,
+    span_a: Vec<Option<f64>>,
+    span_b: Vec<Option<f64>>,
+}
+
+/// Delay a daily series by `n` sessions: `out[i] = series[i - n]`.
+///
+/// Used for the Ichimoku spans, which are computed from bar `i` but belong on
+/// the x-position of bar `i + n`. Values that would land past the end of the
+/// series are dropped — they describe sessions that have not happened yet, and
+/// the chart's x-axis stops at the last one that has.
+fn shift_forward(series: &[Option<f64>], n: usize) -> Vec<Option<f64>> {
+    let len = series.len();
+    let mut out = vec![None; len];
+    if n < len {
+        out[n..].copy_from_slice(&series[..len - n]);
+    }
+    out
 }
 
 /// Connect consecutive defined points of an overlay series.
@@ -457,6 +585,41 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
                 PaneKind::Lines(vec![20.0, 80.0]),
             )
         }
+        Pane::Adx => {
+            let a = indicators::adx(bars, 14);
+            (
+                vec![
+                    (sample(&a.adx, &buckets), theme::ACCENT),
+                    (sample(&a.plus_di, &buckets), theme::UP),
+                    (sample(&a.minus_di, &buckets), theme::DOWN),
+                ],
+                (0.0, 100.0),
+                // 25 is the conventional line between trending and ranging.
+                PaneKind::Lines(vec![25.0]),
+            )
+        }
+        Pane::Cci => {
+            let c = sample(&indicators::cci(bars, 20), &buckets);
+            // CCI is unbounded, so the scale follows the data — but never
+            // tighter than ±150, or the ±100 reference lines would sit on the
+            // edge of the pane and stop reading as thresholds.
+            let (_, mut hi) = symmetric_bounds(c.iter().flatten().cloned());
+            hi = hi.max(150.0);
+            (
+                vec![(c, theme::ACCENT)],
+                (-hi, hi),
+                PaneKind::Lines(vec![-100.0, 0.0, 100.0]),
+            )
+        }
+        Pane::WilliamsR => (
+            vec![(
+                sample(&indicators::williams_r(bars, 14), &buckets),
+                theme::ACCENT,
+            )],
+            // %R is inverted: 0 is the top of the range, -100 the bottom.
+            (-100.0, 0.0),
+            PaneKind::Lines(vec![-20.0, -80.0]),
+        ),
     };
 
     draw_price_axis(f, axis_area, bounds.0, bounds.1);
@@ -723,6 +886,93 @@ mod tests {
     fn symmetric_bounds_centre_on_zero() {
         assert_eq!(symmetric_bounds([-3.0, 1.0].into_iter()), (-3.0, 3.0));
         assert_eq!(symmetric_bounds([].into_iter()), (-1.0, 1.0));
+    }
+
+    #[test]
+    fn forward_shift_delays_a_series_and_drops_what_runs_off_the_end() {
+        let s: Vec<Option<f64>> = (0..5).map(|i| Some(i as f64)).collect();
+        assert_eq!(
+            shift_forward(&s, 2),
+            vec![None, None, Some(0.0), Some(1.0), Some(2.0)],
+            "the last two values project past the axis and are dropped"
+        );
+        assert_eq!(shift_forward(&s, 0), s, "a zero shift is the identity");
+        assert_eq!(
+            shift_forward(&s, 9),
+            vec![None; 5],
+            "a shift longer than the series leaves nothing to draw"
+        );
+        assert!(shift_forward(&[], 3).is_empty());
+    }
+
+    /// Every pane must draw at every terminal size with every overlay on.
+    #[test]
+    fn every_pane_and_overlay_renders_without_panicking() {
+        use crate::app::{App, DataEvent};
+        use crate::cache::Store;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use std::sync::Arc;
+
+        let (tx, _rx) = crate::app::detached_channel();
+        let mut app = App::new(Arc::new(Store::open_in_memory().unwrap()), tx);
+        app.selected = "HBL".into();
+        app.chart.show_donchian = true;
+        app.chart.show_ichimoku = true;
+        app.chart.show_levels = true;
+
+        // Enough history for Ichimoku's 52-session span, and a flat series
+        // too — a limit-locked scrip is the case that divides by zero.
+        for bars in [
+            series(400),
+            (0..80)
+                .map(|i| bar(i as i64 * 86_400, 5.0, 5.0, 5.0, 5.0, 0.0))
+                .collect(),
+            series(3),
+        ] {
+            app.bars.clear();
+            app.on_event(DataEvent::Bars {
+                symbol: "HBL".into(),
+                bars,
+            });
+            for pane in crate::app::Pane::ALL {
+                app.chart.pane = pane;
+                for (w, h) in [(20u16, 10u16), (80, 24), (200, 60), (5, 3)] {
+                    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    term.draw(|f| draw(f, f.area(), &app)).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_header_lists_the_new_overlays() {
+        use crate::app::{App, DataEvent};
+        use crate::cache::Store;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use std::sync::Arc;
+
+        let (tx, _rx) = crate::app::detached_channel();
+        let mut app = App::new(Arc::new(Store::open_in_memory().unwrap()), tx);
+        app.selected = "HBL".into();
+        app.on_event(DataEvent::Bars {
+            symbol: "HBL".into(),
+            bars: series(200),
+        });
+
+        let mut term = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        term.draw(|f| draw(f, f.area(), &app)).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        for label in ["DC20", "ICHI", "S/R"] {
+            assert!(text.contains(label), "{label} missing from the header");
+        }
     }
 
     #[test]

@@ -12,7 +12,13 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::app::{BENCHMARK, BackfillProgress, DataEvent, DataRequest};
 use crate::cache::Store;
+use crate::ext::{self, ExtClient, Headline, MacroRates, MacroSeries};
 use crate::psx::{self, PsxClient};
+
+/// Cache keys for the external-context payloads.
+const KEY_MACRO_SERIES: &str = "macro_series";
+const KEY_HEADLINES: &str = "headlines";
+const KEY_RATES: &str = "rates";
 
 /// How long a cached company profile stays fresh. Filings appear a few times a
 /// quarter, so a day is generous without being stale.
@@ -27,13 +33,21 @@ pub const BACKFILL_DAYS: i64 = 120;
 #[derive(Clone)]
 pub struct Worker {
     client: Arc<PsxClient>,
+    /// Client for the non-PSX feeds. `None` only if TLS setup failed, in which
+    /// case the external panels degrade to whatever the cache holds.
+    ext: Option<Arc<ExtClient>>,
     store: Arc<Store>,
     tx: UnboundedSender<DataEvent>,
 }
 
 impl Worker {
     pub fn new(client: Arc<PsxClient>, store: Arc<Store>, tx: UnboundedSender<DataEvent>) -> Self {
-        Self { client, store, tx }
+        Self {
+            client,
+            ext: ExtClient::new().ok().map(Arc::new),
+            store,
+            tx,
+        }
     }
 
     fn emit(&self, ev: DataEvent) {
@@ -83,6 +97,7 @@ impl Worker {
                 bars,
             });
         }
+        self.emit_cached_external();
     }
 
     /// Main loop: drain interactive requests until the UI drops the sender.
@@ -102,6 +117,7 @@ impl Worker {
                     // Hand off rather than block this queue.
                     tokio::spawn(self.clone().run_backfill(days));
                 }
+                DataRequest::RefreshExternal => self.refresh_external().await,
             }
         }
     }
@@ -147,6 +163,75 @@ impl Worker {
 
         // The benchmark drives beta and relative performance everywhere.
         self.load_series(BENCHMARK).await;
+    }
+
+    /// Refresh the external context: commodities and FX, headlines, and the
+    /// SBP policy rate.
+    ///
+    /// Cache first, exactly like the PSX path: whatever was stored is emitted
+    /// before a single packet leaves, so the Macro screen is populated offline
+    /// and merely sharpens when the fetches land. None of the three sources can
+    /// fail the other two.
+    async fn refresh_external(&self) {
+        self.emit_cached_external();
+
+        let Some(ext) = self.ext.clone() else {
+            self.emit(DataEvent::Error(
+                "external context: HTTP client unavailable".into(),
+            ));
+            return;
+        };
+
+        let (series, errors) = self
+            .tracked("commodities", ext::quotes::fetch_all(&ext))
+            .await;
+        if !series.is_empty() {
+            self.status(format!("{} macro series", series.len()));
+            let _ = self.store.put_external(KEY_MACRO_SERIES, &series);
+            self.emit(DataEvent::MacroSeries(series));
+        }
+        if !errors.is_empty() {
+            self.emit(DataEvent::Error(format!(
+                "commodities: {}",
+                errors.join("; ")
+            )));
+        }
+
+        let (headlines, errors) = self.tracked("news", ext::news::fetch_headlines(&ext)).await;
+        if !headlines.is_empty() {
+            self.status(format!("{} headlines", headlines.len()));
+            let _ = self.store.put_external(KEY_HEADLINES, &headlines);
+            self.emit(DataEvent::Headlines(headlines));
+        }
+        if !errors.is_empty() {
+            self.emit(DataEvent::Error(format!("news: {}", errors.join("; "))));
+        }
+
+        let rates = self
+            .tracked("SBP policy rate", ext::macros::fetch_rates(&ext))
+            .await;
+        if rates.fetched {
+            self.status(format!("SBP policy rate {:.2}%", rates.policy_rate_pct));
+            let _ = self.store.put_external(KEY_RATES, &rates);
+        }
+        self.emit(DataEvent::Rates(rates));
+    }
+
+    /// Emit any stored external context. Silent when the cache is cold.
+    fn emit_cached_external(&self) {
+        if let Ok(Some(series)) = self.store.external::<Vec<MacroSeries>>(KEY_MACRO_SERIES)
+            && !series.is_empty()
+        {
+            self.emit(DataEvent::MacroSeries(series));
+        }
+        if let Ok(Some(items)) = self.store.external::<Vec<Headline>>(KEY_HEADLINES)
+            && !items.is_empty()
+        {
+            self.emit(DataEvent::Headlines(items));
+        }
+        if let Ok(Some(rates)) = self.store.external::<MacroRates>(KEY_RATES) {
+            self.emit(DataEvent::Rates(rates));
+        }
     }
 
     async fn load_symbol(&self, symbol: &str) {

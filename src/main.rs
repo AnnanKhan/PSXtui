@@ -34,6 +34,7 @@ async fn main() -> Result<()> {
     let mut app = App::new(store, req_tx);
     app.request(DataRequest::RefreshMarket);
     app.request(DataRequest::Backfill(BACKFILL_DAYS));
+    app.request(DataRequest::RefreshExternal);
 
     let input_rx = spawn_input_reader();
     let result = run(&mut app, &mut ev_rx, input_rx).await;

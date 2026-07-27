@@ -11,6 +11,7 @@ pub mod analysis;
 pub mod app;
 pub mod cache;
 pub mod data;
+pub mod ext;
 pub mod model;
 pub mod psx;
 pub mod ui;

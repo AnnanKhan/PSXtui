@@ -4,9 +4,12 @@
 pub mod analysis;
 pub mod chart;
 pub mod company;
+pub mod compare;
 pub mod dashboard;
 pub mod intraday;
+pub mod macro_;
 pub mod screener;
+pub mod seasonality;
 pub mod theme;
 pub mod widgets;
 
@@ -34,6 +37,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Analysis => analysis::draw(f, body, app),
         Screen::Company => company::draw(f, body, app),
         Screen::Intraday => intraday::draw(f, body, app),
+        Screen::Compare => compare::draw(f, body, app),
+        Screen::Seasonality => seasonality::draw(f, body, app),
+        Screen::Macro => macro_::draw(f, body, app),
     }
 
     draw_status(f, status, app);
@@ -332,8 +338,10 @@ fn draw_help(f: &mut Frame) {
         section("Dashboard"),
         bind("j / k, ↑ ↓", "move within the focused board"),
         bind("h / l, ← →", "switch board (gainers/losers/active)"),
+        bind("s", "move focus to / from the sector heatmap"),
         bind("g / G", "first / last row"),
-        bind("Enter", "open in chart"),
+        bind("Enter", "open in chart — on a sector, filter the screener"),
+        bind("Esc", "clear a sector filter"),
         Line::raw(""),
         section("Screener"),
         bind("j / k, ↑ ↓", "move cursor"),
@@ -344,15 +352,26 @@ fn draw_help(f: &mut Frame) {
         bind("W", "watchlist only"),
         bind("e", "equities only (hide debt & ETFs)"),
         Line::raw(""),
+        bind("f", "fundamentals view (P/E, EPS, margin)"),
+        Line::raw(""),
         section("Chart"),
-        bind("[ / ]", "shrink / extend range"),
-        bind("i", "cycle lower indicator pane"),
+        bind("[ / ]", "range: 5D 1M 3M 6M YTD 1Y 2Y 3Y 5Y MAX"),
+        bind("i", "cycle pane: volume RSI MACD ATR stoch ADX CCI %R"),
         bind("c", "candles or line"),
         bind("m / e / b", "toggle SMA / EMA / Bollinger"),
+        bind("d / k / v", "toggle Donchian / Ichimoku / S-R levels"),
         Line::raw(""),
         section("Company"),
         bind("h / l, ← →", "switch tab"),
         bind("j / k", "scroll announcements"),
+        Line::raw(""),
+        section("Compare"),
+        bind("a", "add / remove the selected symbol"),
+        bind("c", "reset the comparison set"),
+        bind("[ / ]", "change range"),
+        Line::raw(""),
+        section("Macro"),
+        bind("j / k, g / G", "scroll headlines"),
         Line::raw(""),
         Line::from(Span::styled(
             "    Data: Pakistan Stock Exchange (dps.psx.com.pk)",

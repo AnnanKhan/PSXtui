@@ -49,7 +49,8 @@ Press `?` in the app for the full list.
 | `s` / `S` | Cycle sort column / reverse |
 | `W` / `e` | Watchlist only / equities only |
 | `w` | Add or remove the current symbol from the watchlist |
-| `[` / `]` | Chart range · `i` cycles the indicator pane · `c` candles or line |
+| `[` / `]` | Chart range · `i` cycles the indicator pane |
+| `c` | Chart style: candles → line → dots → area |
 | `m` / `e` / `b` | Toggle SMA / EMA / Bollinger overlays |
 | `r` | Refresh · `q` quit |
 

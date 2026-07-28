@@ -548,8 +548,8 @@ pub struct ChartState {
     pub show_ichimoku: bool,
     /// Horizontal support/resistance levels clustered from swing pivots.
     pub show_levels: bool,
-    /// Draw candles rather than a close line.
-    pub candles: bool,
+    /// How the price series itself is drawn.
+    pub style: ChartStyle,
 }
 
 impl Default for ChartState {
@@ -563,8 +563,60 @@ impl Default for ChartState {
             show_donchian: false,
             show_ichimoku: false,
             show_levels: false,
-            candles: true,
+            style: ChartStyle::Candles,
         }
+    }
+}
+
+/// How the price series is drawn.
+///
+/// The distinction between [`ChartStyle::Line`] and [`ChartStyle::Dots`] is the
+/// canvas marker, not the geometry. Braille packs 2x4 sub-cells into every
+/// character, which is what makes candle wicks precise — but a thin diagonal
+/// line drawn that way lights isolated sub-cells and reads as a dotted trail.
+/// Half-blocks give a solid, continuous stroke at the cost of horizontal
+/// resolution, which a close-only line does not need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartStyle {
+    Candles,
+    /// Solid continuous line through the closes.
+    Line,
+    /// Fine braille line — higher resolution, but reads as dots.
+    Dots,
+    /// Solid line with the area beneath it filled.
+    Area,
+}
+
+impl ChartStyle {
+    pub const ALL: [ChartStyle; 4] = [
+        ChartStyle::Candles,
+        ChartStyle::Line,
+        ChartStyle::Dots,
+        ChartStyle::Area,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ChartStyle::Candles => "Candles",
+            ChartStyle::Line => "Line",
+            ChartStyle::Dots => "Dots",
+            ChartStyle::Area => "Area",
+        }
+    }
+
+    /// Candles need braille's sub-cell precision for wicks; the solid styles
+    /// deliberately trade that away for a continuous stroke.
+    pub fn marker(&self) -> ratatui::symbols::Marker {
+        use ratatui::symbols::Marker;
+        match self {
+            ChartStyle::Candles | ChartStyle::Dots => Marker::Braille,
+            ChartStyle::Line | ChartStyle::Area => Marker::HalfBlock,
+        }
+    }
+
+    pub fn next(&self) -> ChartStyle {
+        let i = Self::ALL.iter().position(|s| s == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
     }
 }
 
@@ -1538,7 +1590,7 @@ impl App {
             // `k` for kumo — the Ichimoku cloud.
             KeyCode::Char('k') => self.chart.show_ichimoku = !self.chart.show_ichimoku,
             KeyCode::Char('v') => self.chart.show_levels = !self.chart.show_levels,
-            KeyCode::Char('c') => self.chart.candles = !self.chart.candles,
+            KeyCode::Char('c') => self.chart.style = self.chart.style.next(),
             _ => {}
         }
     }
@@ -2578,6 +2630,48 @@ mod tests {
         );
         assert_eq!(App::trim_range(&bars, Range::Max).len(), 400);
         assert_eq!(App::trim_range(&bars, Range::D5).len(), 5);
+    }
+
+    #[test]
+    fn c_cycles_the_chart_style_and_wraps() {
+        let mut a = app();
+        a.screen = Screen::Chart;
+        assert_eq!(a.chart.style, ChartStyle::Candles);
+
+        for expected in [
+            ChartStyle::Line,
+            ChartStyle::Dots,
+            ChartStyle::Area,
+            ChartStyle::Candles,
+        ] {
+            a.on_key(key('c'));
+            assert_eq!(a.chart.style, expected);
+        }
+    }
+
+    #[test]
+    fn solid_styles_use_a_block_marker_and_fine_styles_use_braille() {
+        use ratatui::symbols::Marker;
+        // This is the whole point of the option: braille renders a thin
+        // diagonal as a dotted trail, half-blocks render it solid.
+        assert_eq!(ChartStyle::Line.marker(), Marker::HalfBlock);
+        assert_eq!(ChartStyle::Area.marker(), Marker::HalfBlock);
+        assert_eq!(ChartStyle::Dots.marker(), Marker::Braille);
+        // Candles keep braille — wicks need the sub-cell precision.
+        assert_eq!(ChartStyle::Candles.marker(), Marker::Braille);
+    }
+
+    #[test]
+    fn every_chart_style_is_reachable_by_cycling() {
+        let mut seen = vec![ChartStyle::Candles];
+        let mut s = ChartStyle::Candles;
+        for _ in 0..ChartStyle::ALL.len() {
+            s = s.next();
+            seen.push(s);
+        }
+        for style in ChartStyle::ALL {
+            assert!(seen.contains(&style), "{style:?} is unreachable");
+        }
     }
 
     #[test]

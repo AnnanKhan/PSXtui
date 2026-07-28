@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Paragraph};
 
 use super::{theme, widgets};
 use crate::analysis::indicators;
-use crate::app::{App, Pane, Range};
+use crate::app::{App, ChartStyle, Pane, Range};
 use crate::cache::trading_day;
 use crate::model::Bar;
 
@@ -152,6 +152,12 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
             },
         ));
     }
+    ranges.push(Span::styled("  Style ", theme::label_style()));
+    ranges.push(Span::styled(
+        app.chart.style.label(),
+        Style::new().fg(theme::ACCENT).bold(),
+    ));
+    ranges.push(Span::styled(" (c) ", Style::new().fg(theme::DIM)));
     ranges.push(Span::styled(
         format!(" {} sessions", bars.len()),
         theme::label_style(),
@@ -262,10 +268,12 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     draw_price_axis(f, axis_area, lo, hi);
 
     let candles_ref = candles.clone();
-    let draw_candles = app.chart.candles;
+    let style = app.chart.style;
     let canvas = Canvas::default()
         .block(Block::default())
-        .marker(symbols::Marker::Braille)
+        // Braille for candles (sub-cell wick precision), half-blocks for the
+        // line styles (a continuous stroke instead of a dotted trail).
+        .marker(style.marker())
         .x_bounds([0.0, candles_ref.len().max(1) as f64])
         .y_bounds([lo, hi])
         .paint(move |ctx| {
@@ -289,42 +297,85 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
                 });
             }
 
-            if draw_candles {
-                for (i, c) in candles_ref.iter().enumerate() {
-                    let x = i as f64 + 0.5;
-                    let color = if c.close >= c.open {
-                        theme::UP
-                    } else {
-                        theme::DOWN
-                    };
-                    // Wick first so the body paints over it.
-                    ctx.draw(&CanvasLine {
-                        x1: x,
-                        y1: c.low,
-                        x2: x,
-                        y2: c.high,
-                        color,
-                    });
-                    let body_lo = c.open.min(c.close);
-                    let body_hi = c.open.max(c.close);
-                    ctx.draw(&Rectangle {
-                        x: i as f64 + 0.15,
-                        y: body_lo,
-                        width: 0.7,
-                        // A doji has zero height and would vanish entirely.
-                        height: (body_hi - body_lo).max((hi - lo) * 0.002),
-                        color,
-                    });
+            match style {
+                ChartStyle::Candles => {
+                    for (i, c) in candles_ref.iter().enumerate() {
+                        let x = i as f64 + 0.5;
+                        let color = if c.close >= c.open {
+                            theme::UP
+                        } else {
+                            theme::DOWN
+                        };
+                        // Wick first so the body paints over it.
+                        ctx.draw(&CanvasLine {
+                            x1: x,
+                            y1: c.low,
+                            x2: x,
+                            y2: c.high,
+                            color,
+                        });
+                        let body_lo = c.open.min(c.close);
+                        let body_hi = c.open.max(c.close);
+                        ctx.draw(&Rectangle {
+                            x: i as f64 + 0.15,
+                            y: body_lo,
+                            width: 0.7,
+                            // A doji has zero height and would vanish entirely.
+                            height: (body_hi - body_lo).max((hi - lo) * 0.002),
+                            color,
+                        });
+                    }
                 }
-            } else {
-                for (i, w) in candles_ref.windows(2).enumerate() {
-                    ctx.draw(&CanvasLine {
-                        x1: i as f64 + 0.5,
-                        y1: w[0].close,
-                        x2: i as f64 + 1.5,
-                        y2: w[1].close,
-                        color: theme::ACCENT,
-                    });
+                ChartStyle::Area => {
+                    // Fill from the floor up to each close, then stroke the
+                    // top edge so the boundary stays crisp.
+                    //
+                    // Drawn as vertical strokes rather than rectangles:
+                    // canvas rectangles are outlines, not filled shapes, so a
+                    // row of them leaves a comb of gaps where the sides don't
+                    // land on adjacent cells.
+                    for (i, c) in candles_ref.iter().enumerate() {
+                        let top = c.close.max(lo);
+                        for step in 0..3 {
+                            let x = i as f64 + 0.17 + step as f64 * 0.33;
+                            ctx.draw(&CanvasLine {
+                                x1: x,
+                                y1: lo,
+                                x2: x,
+                                y2: top,
+                                color: theme::VOLUME,
+                            });
+                        }
+                    }
+                    for (i, w) in candles_ref.windows(2).enumerate() {
+                        ctx.draw(&CanvasLine {
+                            x1: i as f64 + 0.5,
+                            y1: w[0].close,
+                            x2: i as f64 + 1.5,
+                            y2: w[1].close,
+                            color: theme::ACCENT,
+                        });
+                    }
+                }
+                ChartStyle::Line | ChartStyle::Dots => {
+                    for (i, w) in candles_ref.windows(2).enumerate() {
+                        ctx.draw(&CanvasLine {
+                            x1: i as f64 + 0.5,
+                            y1: w[0].close,
+                            x2: i as f64 + 1.5,
+                            y2: w[1].close,
+                            color: theme::ACCENT,
+                        });
+                    }
+                    // A single session has no segment to draw, so mark the
+                    // point rather than rendering an empty chart.
+                    if candles_ref.len() == 1 {
+                        ctx.print(
+                            0.5,
+                            candles_ref[0].close,
+                            Span::styled("•", Style::new().fg(theme::ACCENT)),
+                        );
+                    }
                 }
             }
 

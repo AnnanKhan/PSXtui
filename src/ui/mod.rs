@@ -357,7 +357,7 @@ fn draw_help(f: &mut Frame) {
         section("Chart"),
         bind("[ / ]", "range: 5D 1M 3M 6M YTD 1Y 2Y 3Y 5Y MAX"),
         bind("i", "cycle pane: volume RSI MACD ATR stoch ADX CCI %R"),
-        bind("c", "candles or line"),
+        bind("c", "style: candles → line → dots → area"),
         bind("m / e / b", "toggle SMA / EMA / Bollinger"),
         bind("d / k / v", "toggle Donchian / Ichimoku / S-R levels"),
         Line::raw(""),

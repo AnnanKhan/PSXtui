@@ -371,7 +371,8 @@ fn draw_help(f: &mut Frame) {
         bind("[ / ]", "change range"),
         Line::raw(""),
         section("Macro"),
-        bind("j / k, g / G", "scroll headlines"),
+        bind("s", "move focus between series and headlines"),
+        bind("j / k, g / G", "scroll the focused panel"),
         Line::raw(""),
         Line::from(Span::styled(
             "    Data: Pakistan Stock Exchange (dps.psx.com.pk)",

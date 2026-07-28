@@ -279,6 +279,14 @@ pub struct SectorAgg {
     pub count: usize,
 }
 
+/// Which Macro panel the keyboard is driving.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MacroFocus {
+    #[default]
+    Series,
+    News,
+}
+
 /// Which half of the dashboard the keyboard is driving.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DashFocus {
@@ -709,6 +717,11 @@ pub struct App {
     pub rates: Option<MacroRates>,
     /// First headline drawn, so a long list can be scrolled on the Macro screen.
     pub news_offset: usize,
+    /// First row drawn in the Macro screen's series list, for scrolling a
+    /// catalogue taller than the panel.
+    pub series_offset: usize,
+    /// Which Macro panel the keyboard drives.
+    pub macro_focus: MacroFocus,
 
     /// Valuation rows for the symbols whose company profile is cached locally.
     ///
@@ -739,6 +752,8 @@ pub struct App {
     refreshed: HashMap<String, Instant>,
     /// A fetch waiting for the cursor to settle, and when it was queued.
     pending_load: Option<(String, Instant)>,
+    /// The selection changed and its cached data has not been read yet.
+    needs_cache_load: bool,
 }
 
 impl App {
@@ -769,6 +784,8 @@ impl App {
             headlines: Vec::new(),
             rates: None,
             news_offset: 0,
+            series_offset: 0,
+            macro_focus: MacroFocus::default(),
             fundamentals,
             watchlist,
             search: None,
@@ -781,6 +798,7 @@ impl App {
             spinner: 0,
             refreshed: HashMap::new(),
             pending_load: None,
+            needs_cache_load: false,
         }
     }
 
@@ -898,20 +916,39 @@ impl App {
         if symbol.is_empty() || symbol == self.selected {
             return;
         }
-        self.selected = symbol.clone();
+        self.selected = symbol;
         // Intraday ticks aren't persisted, so they always start empty.
         self.ticks.clear();
+        self.bars.clear();
+        self.company = None;
         self.announcement_cursor = 0;
+        self.needs_cache_load = true;
+    }
 
-        // Paint from the local cache synchronously.
-        //
-        // The worker also reads the cache, but it does so at the back of a
-        // serial queue — behind the OHLC backfill and any in-flight market
-        // refresh, each spaced by the rate limiter. Waiting for that turned
-        // revisiting a symbol into a fresh "Loading…" every time, even though
-        // the data was already on disk. A local SQLite read is sub-millisecond,
-        // so doing it here is safe on the render path and makes revisits
-        // instant.
+    /// Load the selected symbol's cached data. Call once per frame, before
+    /// rendering.
+    ///
+    /// The read itself is fast, but scrolling a list selects every row it
+    /// passes, and a held arrow key delivers a burst of moves before a single
+    /// frame is drawn. Doing the read inside [`App::select`] meant a full
+    /// history query per row skipped over — work whose result was overwritten
+    /// before anything was displayed. Deferring to frame granularity means one
+    /// read per burst, for the row the cursor actually landed on.
+    pub fn settle_selection(&mut self) {
+        if !self.needs_cache_load {
+            return;
+        }
+        self.needs_cache_load = false;
+
+        let symbol = self.selected.clone();
+        if symbol.is_empty() {
+            return;
+        }
+
+        // The worker also reads the cache, but at the back of a serial queue
+        // behind the OHLC backfill and any in-flight refresh. Waiting for that
+        // turned revisiting a symbol into a fresh "Loading…" every time, even
+        // though the data was already on disk.
         self.bars = self.store.bars(&symbol, None).unwrap_or_default();
         self.company = self
             .store
@@ -1348,22 +1385,34 @@ impl App {
     /// it clamps against the list length so a shrinking feed cannot leave the
     /// viewport past the end.
     fn on_macro_key(&mut self, key: KeyEvent) {
-        let len = self.headlines.len();
+        // `s` moves between the series list and the headlines, mirroring the
+        // dashboard's boards/heatmap toggle.
+        if key.code == KeyCode::Char('s') {
+            self.macro_focus = match self.macro_focus {
+                MacroFocus::Series => MacroFocus::News,
+                MacroFocus::News => MacroFocus::Series,
+            };
+            return;
+        }
+
+        // The catalogue outgrew a single panel once metals, agriculture and
+        // crypto were added, so the series list scrolls rather than silently
+        // dropping whatever sits past the last row.
+        let (offset, len) = match self.macro_focus {
+            MacroFocus::Series => (&mut self.series_offset, self.macro_series.len()),
+            MacroFocus::News => (&mut self.news_offset, self.headlines.len()),
+        };
         if len == 0 {
             return;
         }
         let last = len - 1;
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.news_offset = (self.news_offset + 1).min(last)
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.news_offset = self.news_offset.saturating_sub(1)
-            }
-            KeyCode::PageDown => self.news_offset = (self.news_offset + 10).min(last),
-            KeyCode::PageUp => self.news_offset = self.news_offset.saturating_sub(10),
-            KeyCode::Home | KeyCode::Char('g') => self.news_offset = 0,
-            KeyCode::End | KeyCode::Char('G') => self.news_offset = last,
+            KeyCode::Down | KeyCode::Char('j') => *offset = (*offset + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => *offset = offset.saturating_sub(1),
+            KeyCode::PageDown => *offset = (*offset + 10).min(last),
+            KeyCode::PageUp => *offset = offset.saturating_sub(10),
+            KeyCode::Home | KeyCode::Char('g') => *offset = 0,
+            KeyCode::End | KeyCode::Char('G') => *offset = last,
             _ => {}
         }
     }
@@ -1867,8 +1916,9 @@ mod tests {
         let (tx, _rx) = detached_channel();
         let mut a = App::new(store, tx);
         a.select("HBL".into());
+        a.settle_selection();
 
-        // Populated synchronously — no DataEvent has been delivered yet.
+        // Painted from the cache before any DataEvent has been delivered.
         assert_eq!(a.bars.len(), 30, "cached history must paint immediately");
     }
 
@@ -1882,13 +1932,16 @@ mod tests {
         let mut a = App::new(store, tx);
 
         a.select("HBL".into());
+        settle(&mut a);
         while rx.try_recv().is_ok() {} // drain the first, legitimate fetch
 
         a.select("OGDC".into());
+        settle(&mut a);
         while rx.try_recv().is_ok() {}
 
         // Back to HBL within the freshness window.
         a.select("HBL".into());
+        a.settle_selection();
         assert_eq!(a.bars.len(), 30, "revisit must still show the history");
         assert!(
             rx.try_recv().is_err(),
@@ -1896,8 +1949,10 @@ mod tests {
         );
     }
 
-    /// Pretend the cursor has been still for longer than the debounce.
+    /// Advance a frame: resolve the deferred cache read, then pretend the
+    /// cursor has been still for longer than the debounce.
     fn settle(a: &mut App) -> bool {
+        a.settle_selection();
         if let Some((sym, _)) = a.pending_load.take() {
             a.pending_load = Some((sym, Instant::now() - LOAD_DEBOUNCE));
         }
@@ -1975,6 +2030,28 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_of_moves_costs_one_cache_read_not_one_per_row() {
+        // Scrolling selects every row it passes. Loading each one meant a full
+        // history read per row skipped over, whose result was overwritten
+        // before it was ever drawn — the app fell behind the keyboard and kept
+        // scrolling after the key was released.
+        let mut a = busy_market();
+
+        for _ in 0..20 {
+            a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            assert!(
+                a.needs_cache_load,
+                "the read must stay deferred while keys are still arriving"
+            );
+            assert!(a.bars.is_empty(), "no read may happen mid-burst");
+        }
+
+        // One frame resolves the burst, for the row the cursor landed on.
+        a.settle_selection();
+        assert!(!a.needs_cache_load);
+    }
+
+    #[test]
     fn a_pending_fetch_is_dropped_if_the_cursor_moves_on() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let (tx, mut rx) = detached_channel();
@@ -2000,6 +2077,7 @@ mod tests {
         let (tx, mut rx) = detached_channel();
         let mut a = App::new(store, tx);
         a.select("HBL".into());
+        settle(&mut a);
         while rx.try_recv().is_ok() {}
 
         a.on_key(key('r'));

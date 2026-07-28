@@ -26,6 +26,44 @@ const CHART_BASE: &str = "https://query1.finance.yahoo.com/v8/finance/chart";
 const RANGE: &str = "1y";
 const INTERVAL: &str = "1d";
 
+/// How a series is grouped on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Energy,
+    Metals,
+    Agri,
+    Freight,
+    Currency,
+    Equity,
+    Crypto,
+}
+
+impl Group {
+    /// Section order on the Macro screen — roughly by how directly each moves
+    /// the PSX index.
+    pub const ALL: [Group; 7] = [
+        Group::Energy,
+        Group::Metals,
+        Group::Agri,
+        Group::Freight,
+        Group::Currency,
+        Group::Equity,
+        Group::Crypto,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Group::Energy => "Energy",
+            Group::Metals => "Metals",
+            Group::Agri => "Agriculture",
+            Group::Freight => "Freight",
+            Group::Currency => "Currency",
+            Group::Equity => "Equities",
+            Group::Crypto => "Crypto",
+        }
+    }
+}
+
 /// A series worth watching, and what it is called on Yahoo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacroSpec {
@@ -35,64 +73,166 @@ pub struct MacroSpec {
     pub name: &'static str,
     pub symbol: &'static str,
     pub unit: &'static str,
+    pub group: Group,
 }
 
 /// The watched set.
 ///
-/// Deliberately small: each entry is one HTTP request behind a rate limiter,
-/// and each one has to earn its row by mapping onto a real PSX sector.
+/// Every entry is one HTTP request behind a rate limiter, so each has to earn
+/// its row by mapping onto a real PSX sector — the associations in [`psx_link`]
+/// are the test of that. Crypto is the exception: it maps to no listed sector,
+/// but Pakistan has heavy retail participation and it reads as a risk-appetite
+/// gauge, so it is grouped separately rather than dressed up as a sector driver.
 ///
 /// The Baltic Dry Index (`^BDI`) is **not** quoted by this API. Dry-bulk
 /// freight is represented by the BDRY ETF instead, and is labelled as a proxy
 /// rather than passed off as the index itself.
 pub const CATALOG: &[MacroSpec] = &[
+    // --- Energy ---
     MacroSpec {
         key: "brent",
         name: "Brent crude",
         symbol: "BZ=F",
         unit: "USD/bbl",
+        group: Group::Energy,
     },
     MacroSpec {
         key: "wti",
         name: "WTI crude",
         symbol: "CL=F",
         unit: "USD/bbl",
-    },
-    MacroSpec {
-        key: "usdpkr",
-        name: "USD / PKR",
-        symbol: "PKR=X",
-        unit: "PKR",
-    },
-    MacroSpec {
-        key: "cotton",
-        name: "Cotton",
-        symbol: "CT=F",
-        unit: "USX/lb",
-    },
-    MacroSpec {
-        key: "gold",
-        name: "Gold",
-        symbol: "GC=F",
-        unit: "USD/oz",
+        group: Group::Energy,
     },
     MacroSpec {
         key: "natgas",
         name: "Natural gas",
         symbol: "NG=F",
         unit: "USD/MMBtu",
+        group: Group::Energy,
     },
+    // --- Metals ---
+    MacroSpec {
+        key: "gold",
+        name: "Gold",
+        symbol: "GC=F",
+        unit: "USD/oz",
+        group: Group::Metals,
+    },
+    MacroSpec {
+        key: "silver",
+        name: "Silver",
+        symbol: "SI=F",
+        unit: "USD/oz",
+        group: Group::Metals,
+    },
+    MacroSpec {
+        key: "copper",
+        name: "Copper",
+        symbol: "HG=F",
+        unit: "USD/lb",
+        group: Group::Metals,
+    },
+    MacroSpec {
+        key: "steel",
+        name: "Steel (HRC)",
+        symbol: "HRC=F",
+        unit: "USD/ton",
+        group: Group::Metals,
+    },
+    MacroSpec {
+        key: "aluminium",
+        name: "Aluminium",
+        symbol: "ALI=F",
+        unit: "USD/ton",
+        group: Group::Metals,
+    },
+    // --- Agriculture ---
+    MacroSpec {
+        key: "cotton",
+        name: "Cotton",
+        symbol: "CT=F",
+        unit: "USX/lb",
+        group: Group::Agri,
+    },
+    MacroSpec {
+        key: "wheat",
+        name: "Wheat",
+        symbol: "ZW=F",
+        unit: "USX/bu",
+        group: Group::Agri,
+    },
+    MacroSpec {
+        key: "sugar",
+        name: "Sugar #11",
+        symbol: "SB=F",
+        unit: "USX/lb",
+        group: Group::Agri,
+    },
+    MacroSpec {
+        key: "soyoil",
+        name: "Soybean oil",
+        symbol: "ZL=F",
+        unit: "USX/lb",
+        group: Group::Agri,
+    },
+    // --- Freight ---
     MacroSpec {
         key: "freight",
         name: "Dry bulk freight (BDRY ETF, proxy)",
         symbol: "BDRY",
         unit: "USD",
+        group: Group::Freight,
+    },
+    // --- Currency & equities ---
+    MacroSpec {
+        key: "usdpkr",
+        name: "USD / PKR",
+        symbol: "PKR=X",
+        unit: "PKR",
+        group: Group::Currency,
     },
     MacroSpec {
         key: "sp500",
         name: "S&P 500",
         symbol: "^GSPC",
         unit: "index",
+        group: Group::Equity,
+    },
+    // --- Crypto ---
+    MacroSpec {
+        key: "btc",
+        name: "Bitcoin",
+        symbol: "BTC-USD",
+        unit: "USD",
+        group: Group::Crypto,
+    },
+    MacroSpec {
+        key: "eth",
+        name: "Ethereum",
+        symbol: "ETH-USD",
+        unit: "USD",
+        group: Group::Crypto,
+    },
+    MacroSpec {
+        key: "sol",
+        name: "Solana",
+        symbol: "SOL-USD",
+        unit: "USD",
+        group: Group::Crypto,
+    },
+    MacroSpec {
+        key: "bnb",
+        name: "BNB",
+        symbol: "BNB-USD",
+        unit: "USD",
+        group: Group::Crypto,
+    },
+    MacroSpec {
+        key: "xrp",
+        name: "XRP",
+        symbol: "XRP-USD",
+        unit: "USD",
+        group: Group::Crypto,
     },
 ];
 
@@ -103,12 +243,22 @@ pub const CATALOG: &[MacroSpec] = &[
 pub fn psx_link(key: &str) -> &'static str {
     match key {
         "brent" | "wti" => "refineries & OMCs — ATRL, PSO, APL",
-        "usdpkr" => "importers vs exporters, external debt",
-        "cotton" => "textile input cost — NML, GATM, ILP",
-        "gold" => "safe-haven flows, jewellery demand",
         "natgas" => "fertiliser & power feedstock — FFC, EFERT",
+        "gold" => "safe-haven flows, jewellery demand",
+        "silver" => "jewellery demand, industrial use",
+        "copper" => "cables & electrical goods — PAEL, PCAL",
+        "steel" => "long & flat steel — ASTL, ISL, MUGHAL",
+        "aluminium" => "engineering & auto parts input",
+        "cotton" => "textile input cost — NML, GATM, ILP",
+        "wheat" => "flour mills & food inflation",
+        "sugar" => "sugar & allied — JDWS, ALNRS",
+        "soyoil" => "edible oil imports — UNITY, PAKD",
         "freight" => "shipping & cement exports — PNSC, LUCK",
+        "usdpkr" => "importers vs exporters, external debt",
         "sp500" => "global risk appetite, foreign flows",
+        // Crypto drives no listed sector; it is a retail risk-appetite gauge,
+        // and saying so is more useful than inventing a linkage.
+        "btc" | "eth" | "sol" | "bnb" | "xrp" => "retail risk appetite (no listed sector)",
         _ => "",
     }
 }
@@ -313,6 +463,7 @@ mod tests {
             name: "Brent crude",
             symbol: "BZ=F",
             unit: "USD/bbl",
+            group: Group::Energy,
         }
     }
 
@@ -450,5 +601,62 @@ mod tests {
         let freight = CATALOG.iter().find(|s| s.key == "freight").unwrap();
         assert!(freight.name.contains("proxy"));
         assert_eq!(freight.symbol, "BDRY");
+    }
+
+    #[test]
+    fn catalogue_keys_and_symbols_are_unique() {
+        // A duplicate key would collide in the cache and in the group lookup.
+        for (i, a) in CATALOG.iter().enumerate() {
+            for b in CATALOG.iter().skip(i + 1) {
+                assert_ne!(a.key, b.key, "duplicate key {}", a.key);
+                assert_ne!(a.symbol, b.symbol, "duplicate symbol {}", a.symbol);
+            }
+        }
+    }
+
+    #[test]
+    fn every_group_that_is_used_is_reachable_from_group_all() {
+        for spec in CATALOG {
+            assert!(
+                Group::ALL.contains(&spec.group),
+                "{} is in a group the screen never renders",
+                spec.key
+            );
+        }
+    }
+
+    #[test]
+    fn the_catalogue_covers_energy_metals_agri_and_crypto() {
+        let has = |g: Group| CATALOG.iter().any(|s| s.group == g);
+        for g in [Group::Energy, Group::Metals, Group::Agri, Group::Crypto] {
+            assert!(has(g), "{} has no series", g.label());
+        }
+    }
+
+    #[test]
+    fn crypto_does_not_claim_a_psx_sector() {
+        // Crypto maps to no listed sector. Saying so is more useful than
+        // inventing a linkage, and the wording is asserted so it stays honest.
+        for spec in CATALOG.iter().filter(|s| s.group == Group::Crypto) {
+            let link = psx_link(spec.key);
+            assert!(
+                link.contains("no listed sector"),
+                "{} implies a sector linkage it does not have: {link:?}",
+                spec.key
+            );
+        }
+    }
+
+    #[test]
+    fn yahoo_symbols_survive_url_encoding() {
+        // Futures carry '=' and indices a leading '^'; crypto uses a plain
+        // hyphen and must not be mangled.
+        for spec in CATALOG {
+            let encoded = encode_segment(spec.symbol);
+            assert!(!encoded.contains('='), "{} left a raw '='", spec.symbol);
+            assert!(!encoded.contains('^'), "{} left a raw '^'", spec.symbol);
+            assert!(!encoded.is_empty());
+        }
+        assert_eq!(encode_segment("BTC-USD"), "BTC-USD");
     }
 }

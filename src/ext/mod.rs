@@ -28,4 +28,4 @@ pub mod quotes;
 pub use client::ExtClient;
 pub use macros::{MacroRates, fetch_rates, parse_policy_rate};
 pub use news::{FEEDS, Headline, fetch_headlines, parse_rss};
-pub use quotes::{CATALOG, MacroSeries, MacroSpec, fetch_series, parse_chart, psx_link};
+pub use quotes::{CATALOG, Group, MacroSeries, MacroSpec, fetch_series, parse_chart, psx_link};

@@ -62,10 +62,20 @@ async fn run(
     loop {
         tokio::select! {
             Some(event) = input_rx.recv() => {
-                match event {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
-                    Event::Resize(_, _) => {}
-                    _ => continue,
+                // Drain every key already buffered, then redraw once.
+                //
+                // Held arrow keys arrive faster than a frame can be drawn.
+                // Handling one per redraw let the queue grow, so scrolling
+                // lagged behind the keyboard and kept moving after the key was
+                // released while the backlog drained. Applying the whole burst
+                // to state before drawing keeps the cursor where the user
+                // actually left it.
+                let mut acted = handle_input(app, event);
+                while let Ok(next) = input_rx.try_recv() {
+                    acted |= handle_input(app, next);
+                }
+                if !acted {
+                    continue;
                 }
             }
             Some(ev) = ev_rx.recv() => {
@@ -93,7 +103,23 @@ async fn run(
         if app.should_quit {
             return Ok(());
         }
+        // Resolve any pending selection once, after the whole input burst has
+        // been applied — not once per key.
+        app.settle_selection();
         terminal.draw(|f| ui::draw(f, app))?;
+    }
+}
+
+/// Apply one terminal event. Returns whether it warrants a redraw.
+fn handle_input(app: &mut App, event: Event) -> bool {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            app.on_key(key);
+            true
+        }
+        // A resize needs a repaint even though no state changed.
+        Event::Resize(_, _) => true,
+        _ => false,
     }
 }
 

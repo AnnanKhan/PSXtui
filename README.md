@@ -23,7 +23,7 @@ return analytics, company fundamentals, and intraday microstructure.
 | 6 | **Intraday** | Session price with VWAP, 15-minute volume distribution, live trade tape |
 | 7 | **Compare** | 2-4 scrips side by side — rebased performance overlay, risk table, correlation matrix |
 | 8 | **Seasonality** | Month-by-year return grid, day-of-week effects, return distribution, streaks |
-| 9 | **Macro** | Oil, gold, cotton, USD/PKR, freight proxy, SBP policy rate and business news — with correlation to the selected scrip |
+| 9 | **Macro** | 20 external series — energy, metals, agriculture, freight, FX, crypto — plus the SBP policy rate and business news, with correlation to the selected scrip |
 
 Timeframes: 5D, 1M, 3M, 6M, YTD, 1Y, 2Y, 3Y, 5Y and MAX.
 
@@ -43,7 +43,7 @@ Press `?` in the app for the full list.
 
 | Key | Action |
 |-----|--------|
-| `1`–`6`, `Tab` | Switch screen |
+| `1`–`9`, `Tab` | Switch screen |
 | `/` | Search by symbol, company or sector |
 | `j`/`k`, `↑`/`↓` | Move cursor · `Enter` opens in the chart |
 | `s` / `S` | Cycle sort column / reverse |
@@ -74,7 +74,8 @@ All unauthenticated, no API keys:
 
 | Source | Used for |
 |--------|----------|
-| Yahoo Finance chart API | Brent, WTI, gold, cotton, natural gas, USD/PKR, S&P 500 |
+| Yahoo Finance chart API | Energy (Brent, WTI, gas), metals (gold, silver, copper, steel HRC, aluminium), agriculture (cotton, wheat, sugar, soybean oil), USD/PKR, S&P 500 |
+| Yahoo Finance (crypto) | BTC, ETH, SOL, BNB, XRP — a retail risk-appetite gauge, not a sector driver |
 | Yahoo Finance (`BDRY`) | Dry-bulk freight — a **proxy** ETF, not the Baltic Dry Index, which isn't freely available |
 | Business Recorder / Dawn RSS | Business and market headlines, matched to the selected scrip |
 | `sbp.org.pk` | SBP policy rate, which feeds the risk-free rate in Sharpe and Sortino |

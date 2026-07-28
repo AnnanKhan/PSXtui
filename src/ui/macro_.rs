@@ -26,7 +26,7 @@ use super::{theme, widgets};
 use crate::analysis::stats;
 use crate::app::App;
 use crate::cache::trading_day;
-use crate::ext::{MacroSeries, psx_link};
+use crate::ext::{Group, MacroSeries, psx_link};
 use crate::model::Bar;
 
 /// Below this width the two-column layout has no room for either column.
@@ -75,7 +75,20 @@ fn draw_narrow(f: &mut Frame, area: Rect, app: &App) {
 // --- commodities ---------------------------------------------------------
 
 fn draw_commodities(f: &mut Frame, area: Rect, app: &App) {
-    let block = widgets::panel("Commodities & FX");
+    let focused = app.macro_focus == crate::app::MacroFocus::Series;
+    let title = if focused {
+        "Commodities, metals, crypto  ·  j/k scroll · s to news".to_string()
+    } else {
+        format!(
+            "Commodities, metals, crypto  ({} · s)",
+            app.macro_series.len()
+        )
+    };
+    let block = widgets::panel(&title).border_style(if focused {
+        Style::new().fg(theme::ACCENT)
+    } else {
+        theme::border_style()
+    });
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -91,12 +104,80 @@ fn draw_commodities(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let w = inner.width as usize;
-    let mut lines: Vec<Line> = Vec::with_capacity(app.macro_series.len());
-    for s in app.macro_series.iter().take(inner.height as usize) {
-        lines.push(series_row(s, w));
-    }
+    let budget = inner.height as usize;
 
-    f.render_widget(Paragraph::new(Text::from(lines)), inner);
+    // Build the full list first, then window it. Grouping and scrolling have to
+    // agree on row numbering, and headings occupy rows too — slicing the series
+    // before laying out would put the offset out of step with what is drawn.
+    let mut all: Vec<Line> = Vec::with_capacity(app.macro_series.len() + Group::ALL.len());
+    for group in Group::ALL {
+        let rows: Vec<&MacroSeries> = app
+            .macro_series
+            .iter()
+            .filter(|s| group_of(&s.key) == Some(group))
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        all.push(Line::from(Span::styled(
+            format!("{} ", group.label()),
+            Style::new().fg(theme::MUTED).bold(),
+        )));
+        all.extend(rows.into_iter().map(|s| series_row(s, w)));
+    }
+    // Anything the catalogue gained without a group still gets shown.
+    all.extend(
+        app.macro_series
+            .iter()
+            .filter(|s| group_of(&s.key).is_none())
+            .map(|s| series_row(s, w)),
+    );
+
+    let max_offset = all.len().saturating_sub(budget);
+    let offset = app.series_offset.min(max_offset);
+    let end = (offset + budget).min(all.len());
+    let visible: Vec<Line> = all[offset..end].to_vec();
+
+    f.render_widget(Paragraph::new(Text::from(visible)), inner);
+
+    // Show that there is more above or below, so a cut-off crypto section
+    // reads as scrollable rather than missing.
+    if all.len() > budget && inner.width > 2 {
+        let mut marks = Vec::new();
+        if offset > 0 {
+            marks.push("\u{25b2}");
+        }
+        if end < all.len() {
+            marks.push("\u{25bc}");
+        }
+        if !marks.is_empty() {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    marks.join(" "),
+                    Style::new().fg(theme::ACCENT),
+                )))
+                .alignment(Alignment::Right),
+                Rect {
+                    x: inner.x,
+                    y: inner.y + inner.height.saturating_sub(1),
+                    width: inner.width,
+                    height: 1,
+                },
+            );
+        }
+    }
+}
+
+/// The group a cached series belongs to, looked up by key.
+///
+/// Cached series are deserialised from JSON written by an earlier run, so a key
+/// that has since been dropped from the catalogue resolves to `None` rather
+/// than being assumed into the wrong section.
+fn group_of(key: &str) -> Option<Group> {
+    crate::ext::CATALOG
+        .iter()
+        .find(|spec| spec.key == key)
+        .map(|spec| spec.group)
 }
 
 /// How wide the name column may be at a given panel width.
@@ -363,7 +444,12 @@ fn draw_news(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "News".to_string()
     };
-    let block = widgets::panel(&title);
+    let focused = app.macro_focus == crate::app::MacroFocus::News;
+    let block = widgets::panel(&title).border_style(if focused {
+        Style::new().fg(theme::ACCENT)
+    } else {
+        theme::border_style()
+    });
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {

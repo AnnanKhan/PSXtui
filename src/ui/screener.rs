@@ -15,6 +15,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
+use super::hit::{Target, Zone};
 use crate::app::{App, SortKey, Valuation};
 use crate::model::Quote;
 
@@ -530,6 +531,28 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .with_selected(Some(selected));
 
     f.render_stateful_widget(table, inner, &mut state);
+
+    // Read the offset back rather than assuming ours was used: the table
+    // scrolls itself to keep the selection visible, so only it knows which
+    // rows ended up on screen. Registering from a guessed offset would put
+    // clicks a few rows out exactly when the list had scrolled.
+    let offset = state.offset();
+    let header_rows = u16::from(inner.height >= 2);
+    let mut hits = app.hits.borrow_mut();
+    hits.zone(area, Zone::Screener);
+    if inner.height > header_rows {
+        hits.rows(
+            Rect {
+                x: inner.x,
+                y: inner.y + header_rows,
+                width: inner.width,
+                height: inner.height - header_rows,
+            },
+            offset,
+            rows.len().saturating_sub(offset),
+            Target::ScreenerRow,
+        );
+    }
 }
 
 #[cfg(test)]

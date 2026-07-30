@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
+};
+use crossterm::execute;
 use tokio::sync::mpsc;
 
 use psxtui::app::{App, DataEvent, DataRequest};
@@ -39,6 +42,9 @@ async fn main() -> Result<()> {
     let input_rx = spawn_input_reader();
     let result = run(&mut app, &mut ev_rx, input_rx).await;
 
+    // Leave mouse reporting off on the way out: a terminal left in that mode
+    // after the process exits stops responding to selection entirely.
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -49,6 +55,10 @@ async fn run(
     mut input_rx: mpsc::UnboundedReceiver<Event>,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
+    // Mouse reporting is opt-out rather than opt-in: it is what users expect,
+    // and `M` turns it off when the terminal's own selection is wanted.
+    let mut mouse_on = false;
+    set_mouse(&mut mouse_on, app.mouse_enabled);
     let mut refresh = tokio::time::interval(AUTO_REFRESH);
     // The first tick fires immediately; the startup refresh already covers it.
     refresh.tick().await;
@@ -103,6 +113,8 @@ async fn run(
         if app.should_quit {
             return Ok(());
         }
+        // Follow any change to the mouse toggle before drawing.
+        set_mouse(&mut mouse_on, app.mouse_enabled);
         // Resolve any pending selection once, after the whole input burst has
         // been applied — not once per key.
         app.settle_selection();
@@ -117,9 +129,33 @@ fn handle_input(app: &mut App, event: Event) -> bool {
             app.on_key(key);
             true
         }
+        Event::Mouse(ev) => {
+            // Plain motion arrives continuously on some terminals and changes
+            // nothing, so it must not force a redraw.
+            if matches!(ev.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
+                return false;
+            }
+            app.on_mouse(ev);
+            true
+        }
         // A resize needs a repaint even though no state changed.
         Event::Resize(_, _) => true,
         _ => false,
+    }
+}
+
+/// Turn terminal mouse reporting on or off, only when it actually changes.
+fn set_mouse(current: &mut bool, wanted: bool) {
+    if *current == wanted {
+        return;
+    }
+    let ok = if wanted {
+        execute!(std::io::stdout(), EnableMouseCapture).is_ok()
+    } else {
+        execute!(std::io::stdout(), DisableMouseCapture).is_ok()
+    };
+    if ok {
+        *current = wanted;
     }
 }
 

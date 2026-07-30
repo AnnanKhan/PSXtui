@@ -5,18 +5,19 @@
 //! post [`DataRequest`]s to a background worker and receive [`DataEvent`]s
 //! back, so the interface stays responsive while PSX is slow.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::cache::Store;
 use crate::ext::{Headline, MacroRates, MacroSeries};
 use crate::model::{Bar, Company, Index, Quote, SymbolInfo, Tick};
+use crate::ui::hit::{HitMap, Target, Zone};
 
 /// The benchmark every risk statistic is measured against.
 pub const BENCHMARK: &str = "KSE100";
@@ -278,6 +279,13 @@ pub struct SectorAgg {
     pub turnover: f64,
     pub count: usize,
 }
+
+/// How long two clicks on the same target may be apart and still count as a
+/// double-click. Terminals do not report double-clicks, so it is timed here.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Rows moved per wheel notch.
+const WHEEL_LINES: usize = 3;
 
 /// Which Macro panel the keyboard is driving.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -704,6 +712,13 @@ pub struct App {
     pub dashboard: DashboardState,
     /// Published by the dashboard renderer each frame; read by key handling.
     pub dash_layout: Cell<DashLayout>,
+    /// What the renderer drew and where, for mouse hit-testing.
+    pub hits: RefCell<HitMap>,
+    /// The last click, for detecting a double-click.
+    last_click: Option<(Target, Instant)>,
+    /// Whether the terminal is reporting mouse events. Toggled with `M` so the
+    /// terminal's own text selection can be used.
+    pub mouse_enabled: bool,
     pub chart: ChartState,
     pub compare: CompareState,
     pub company_tab: CompanyTab,
@@ -776,6 +791,9 @@ impl App {
             screener: ScreenerState::default(),
             dashboard: DashboardState::default(),
             dash_layout: Cell::new(DashLayout::default()),
+            hits: RefCell::new(HitMap::default()),
+            last_click: None,
+            mouse_enabled: true,
             chart: ChartState::default(),
             compare: CompareState::default(),
             company_tab: CompanyTab::Profile,
@@ -1313,6 +1331,16 @@ impl App {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if ctrl => self.should_quit = true,
             KeyCode::Char('?') => self.show_help = true,
+            // Mouse reporting swallows the terminal's own text selection, so
+            // it can be turned off when you want to copy something out.
+            KeyCode::Char('M') => {
+                self.mouse_enabled = !self.mouse_enabled;
+                self.status = if self.mouse_enabled {
+                    "Mouse on".into()
+                } else {
+                    "Mouse off — terminal text selection restored".into()
+                };
+            }
             KeyCode::Esc => {
                 // Clear the most specific thing first, so one key backs out of
                 // a drill-through without also dismissing an unrelated error.
@@ -1358,6 +1386,224 @@ impl App {
             }
 
             _ => self.on_screen_key(key),
+        }
+    }
+
+    // --- mouse -----------------------------------------------------------
+
+    /// Handle a mouse event against the regions the last frame registered.
+    pub fn on_mouse(&mut self, ev: MouseEvent) {
+        // The help overlay covers everything beneath it; a click there should
+        // dismiss it rather than reach a control it is hiding.
+        if self.show_help {
+            if matches!(ev.kind, MouseEventKind::Down(_)) {
+                self.show_help = false;
+            }
+            return;
+        }
+
+        match ev.kind {
+            MouseEventKind::ScrollUp => self.scroll_at(ev.column, ev.row, -(WHEEL_LINES as isize)),
+            MouseEventKind::ScrollDown => self.scroll_at(ev.column, ev.row, WHEEL_LINES as isize),
+            MouseEventKind::Down(MouseButton::Left) => self.click_at(ev.column, ev.row),
+            _ => {}
+        }
+    }
+
+    /// Act on a left click at a cell.
+    fn click_at(&mut self, x: u16, y: u16) {
+        // Resolve against the hit map and drop the borrow before mutating:
+        // handling a click can trigger a redraw path that rewrites the map.
+        let hit = {
+            let hits = self.hits.borrow();
+            (hits.target_at(x, y), hits.zone_at(x, y))
+        };
+        let Some(target) = hit.0 else {
+            // Clicking a panel's empty space still moves focus there, which is
+            // what makes the subsequent wheel and arrow keys go where expected.
+            if let Some(zone) = hit.1 {
+                self.focus_zone(zone);
+            }
+            return;
+        };
+
+        let now = Instant::now();
+        let double = self
+            .last_click
+            .is_some_and(|(prev, at)| prev == target && at.elapsed() < DOUBLE_CLICK);
+        self.last_click = Some((target, now));
+
+        match target {
+            Target::Tab(i) => {
+                if let Some(screen) = Screen::ALL.get(i) {
+                    self.screen = *screen;
+                }
+            }
+
+            Target::ScreenerRow(i) => {
+                let symbol = self.visible_quotes().get(i).map(|q| q.symbol.clone());
+                if let Some(symbol) = symbol {
+                    self.screener.cursor = i;
+                    self.select(symbol);
+                    // Click to inspect, double-click to open — the same
+                    // convention as a file manager.
+                    if double {
+                        self.screen = Screen::Chart;
+                    }
+                }
+            }
+
+            Target::BoardRow { board, row } => {
+                self.dashboard.focus = DashFocus::Boards;
+                self.dashboard.board = board;
+                let rows = self.dash_layout.get().rows;
+                let b = self.dash_board();
+                if let Some(q) = self.leaderboard(b, rows).get(row) {
+                    let symbol = q.symbol.clone();
+                    self.dashboard.cursor = row;
+                    self.select(symbol);
+                    if double {
+                        self.screen = Screen::Chart;
+                    }
+                }
+            }
+
+            Target::SectorRow(i) => {
+                self.dashboard.focus = DashFocus::Sectors;
+                if i < self.sectors().len() {
+                    self.dashboard.sector = i;
+                    if double && let Some(s) = self.sector_at_cursor() {
+                        self.sector_filter = Some(s.name.clone());
+                        self.screener.cursor = 0;
+                        self.screen = Screen::Screener;
+                        self.status = format!("Filtered to {}", s.name);
+                    }
+                }
+            }
+
+            Target::CompanyTab(i) => {
+                if let Some(tab) = CompanyTab::ALL.get(i) {
+                    self.company_tab = *tab;
+                    self.announcement_cursor = 0;
+                }
+            }
+
+            Target::Announcement(i) => {
+                let len = self
+                    .company
+                    .as_ref()
+                    .map(|c| c.announcements.len())
+                    .unwrap_or(0);
+                if i < len {
+                    self.announcement_cursor = i;
+                }
+            }
+
+            Target::ChartRange(i) => {
+                if let Some(r) = Range::ALL.get(i) {
+                    self.chart.range = *r;
+                }
+            }
+            Target::ChartStyle => self.chart.style = self.chart.style.next(),
+            Target::ChartPane => {
+                let i = Pane::ALL
+                    .iter()
+                    .position(|p| *p == self.chart.pane)
+                    .unwrap_or(0);
+                self.chart.pane = Pane::ALL[(i + 1) % Pane::ALL.len()];
+            }
+
+            Target::MacroRow(_) => self.macro_focus = MacroFocus::Series,
+            Target::NewsRow(i) => {
+                self.macro_focus = MacroFocus::News;
+                if i < self.headlines.len() {
+                    self.news_offset = i;
+                }
+            }
+        }
+    }
+
+    /// Move keyboard focus to whichever panel was clicked, so the wheel and the
+    /// arrow keys agree about what they are driving.
+    fn focus_zone(&mut self, zone: Zone) {
+        match zone {
+            Zone::Board(i) => {
+                self.dashboard.focus = DashFocus::Boards;
+                self.dashboard.board = i;
+            }
+            Zone::Sectors => self.dashboard.focus = DashFocus::Sectors,
+            Zone::MacroSeries => self.macro_focus = MacroFocus::Series,
+            Zone::MacroNews => self.macro_focus = MacroFocus::News,
+            Zone::Screener | Zone::Announcements | Zone::Chart => {}
+        }
+    }
+
+    /// Scroll whichever panel the pointer is over.
+    ///
+    /// Deliberately keyed on position rather than focus: a wheel acts on what
+    /// is under the pointer, which is not necessarily what the keyboard drives.
+    fn scroll_at(&mut self, x: u16, y: u16, delta: isize) {
+        let zone = self.hits.borrow().zone_at(x, y);
+        let Some(zone) = zone else {
+            return;
+        };
+
+        match zone {
+            Zone::Screener => {
+                let len = self.visible_quotes().len();
+                self.screener.cursor = step(self.screener.cursor, delta, len);
+                if let Some(q) = self.visible_quotes().get(self.screener.cursor) {
+                    let symbol = q.symbol.clone();
+                    self.select(symbol);
+                }
+            }
+            Zone::Board(i) => {
+                self.dashboard.focus = DashFocus::Boards;
+                self.dashboard.board = i;
+                let rows = self.dash_layout.get().rows;
+                let b = self.dash_board();
+                let len = self.leaderboard(b, rows).len();
+                self.dashboard.cursor = step(self.dashboard.cursor, delta, len);
+                if let Some(symbol) = self.dash_symbol() {
+                    self.select(symbol);
+                }
+            }
+            Zone::Sectors => {
+                self.dashboard.focus = DashFocus::Sectors;
+                let len = self.sectors().len();
+                self.dashboard.sector = step(self.dashboard.sector, delta, len);
+                let window = self.dash_layout.get().sector_rows.max(1);
+                self.dashboard.sector_offset =
+                    keep_visible(self.dashboard.sector, self.dashboard.sector_offset, window);
+            }
+            Zone::Announcements => {
+                let len = self
+                    .company
+                    .as_ref()
+                    .map(|c| c.announcements.len())
+                    .unwrap_or(0);
+                self.announcement_cursor = step(self.announcement_cursor, delta, len);
+            }
+            Zone::MacroSeries => {
+                let len = self.macro_series.len();
+                self.series_offset = step(self.series_offset, delta, len);
+            }
+            Zone::MacroNews => {
+                let len = self.headlines.len();
+                self.news_offset = step(self.news_offset, delta, len);
+            }
+            // Over the chart the wheel changes timeframe, which is what a
+            // charting tool does with a wheel.
+            Zone::Chart => {
+                let i = Range::ALL
+                    .iter()
+                    .position(|r| *r == self.chart.range)
+                    .unwrap_or(0) as isize;
+                let n = Range::ALL.len() as isize;
+                // Scrolling up zooms in, so it walks toward the shorter window.
+                let next = (i + delta.signum()).clamp(0, n - 1);
+                self.chart.range = Range::ALL[next as usize];
+            }
         }
     }
 
@@ -1765,6 +2011,27 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+/// Move a cursor by `delta`, clamped to `len`. Returns 0 for an empty list.
+fn step(cursor: usize, delta: isize, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let last = (len - 1) as isize;
+    (cursor as isize + delta).clamp(0, last) as usize
+}
+
+/// Slide `offset` the least amount that brings `cursor` inside a `window`-row
+/// view.
+fn keep_visible(cursor: usize, offset: usize, window: usize) -> usize {
+    if cursor < offset {
+        cursor
+    } else if cursor >= offset + window {
+        cursor + 1 - window
+    } else {
+        offset
     }
 }
 
@@ -2750,6 +3017,244 @@ mod tests {
         for style in ChartStyle::ALL {
             assert!(seen.contains(&style), "{style:?} is unreachable");
         }
+    }
+
+    fn click(a: &mut App, x: u16, y: u16) {
+        a.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    fn wheel(a: &mut App, x: u16, y: u16, down: bool) {
+        a.on_mouse(MouseEvent {
+            kind: if down {
+                MouseEventKind::ScrollDown
+            } else {
+                MouseEventKind::ScrollUp
+            },
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    /// Register a single full-width row target plus its zone.
+    fn put(a: &App, y: u16, target: Target, zone: Zone) {
+        let r = ratatui::layout::Rect {
+            x: 0,
+            y,
+            width: 40,
+            height: 1,
+        };
+        let mut hits = a.hits.borrow_mut();
+        hits.zone(
+            ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 40,
+            },
+            zone,
+        );
+        hits.target(r, target);
+    }
+
+    #[test]
+    fn clicking_a_tab_switches_screen() {
+        let mut a = app();
+        put(&a, 1, Target::Tab(4), Zone::Screener);
+        click(&mut a, 3, 1);
+        assert_eq!(a.screen, Screen::ALL[4]);
+    }
+
+    #[test]
+    fn clicking_a_tab_index_past_the_end_is_ignored() {
+        // Guards against a stale hit map from a build with more screens.
+        let mut a = app();
+        put(&a, 1, Target::Tab(99), Zone::Screener);
+        click(&mut a, 3, 1);
+        assert_eq!(a.screen, Screen::Dashboard);
+    }
+
+    #[test]
+    fn clicking_a_screener_row_selects_it_and_double_click_opens_the_chart() {
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(vec![
+            quote("AAA", 10.0, 1.0, 100.0),
+            quote("BBB", 20.0, 2.0, 200.0),
+        ]));
+        a.screener.equities_only = false;
+        put(&a, 5, Target::ScreenerRow(1), Zone::Screener);
+
+        let expected = a.visible_quotes()[1].symbol.clone();
+        click(&mut a, 3, 5);
+        assert_eq!(a.screener.cursor, 1);
+        assert_eq!(a.selected, expected);
+        assert_eq!(a.screen, Screen::Dashboard, "one click must not navigate");
+
+        click(&mut a, 3, 5);
+        assert_eq!(a.screen, Screen::Chart, "double click opens the chart");
+    }
+
+    #[test]
+    fn two_clicks_on_different_rows_are_not_a_double_click() {
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(vec![
+            quote("AAA", 10.0, 1.0, 100.0),
+            quote("BBB", 20.0, 2.0, 200.0),
+        ]));
+        a.screener.equities_only = false;
+
+        put(&a, 5, Target::ScreenerRow(0), Zone::Screener);
+        click(&mut a, 3, 5);
+        a.hits.borrow_mut().clear();
+        put(&a, 6, Target::ScreenerRow(1), Zone::Screener);
+        click(&mut a, 3, 6);
+
+        assert_eq!(a.screen, Screen::Dashboard, "different rows must not open");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_whatever_is_under_the_pointer() {
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(
+            (0..40)
+                .map(|i| quote(&format!("S{i:02}"), 10.0, i as f64, 100.0))
+                .collect(),
+        ));
+        a.screener.equities_only = false;
+        put(&a, 5, Target::ScreenerRow(0), Zone::Screener);
+
+        wheel(&mut a, 3, 5, true);
+        assert_eq!(a.screener.cursor, WHEEL_LINES);
+        wheel(&mut a, 3, 5, false);
+        assert_eq!(a.screener.cursor, 0);
+        // Cannot be driven past either end.
+        wheel(&mut a, 3, 5, false);
+        assert_eq!(a.screener.cursor, 0);
+    }
+
+    #[test]
+    fn the_wheel_over_the_chart_changes_timeframe() {
+        let mut a = app();
+        a.chart.range = Range::M3;
+        put(&a, 5, Target::ChartStyle, Zone::Chart);
+
+        wheel(&mut a, 3, 5, true);
+        assert_eq!(a.chart.range, Range::M6, "down walks toward longer windows");
+        wheel(&mut a, 3, 5, false);
+        assert_eq!(a.chart.range, Range::M3);
+    }
+
+    #[test]
+    fn the_wheel_over_nothing_does_nothing() {
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(vec![quote("AAA", 10.0, 1.0, 100.0)]));
+        wheel(&mut a, 99, 99, true);
+        assert_eq!(a.screener.cursor, 0);
+    }
+
+    #[test]
+    fn clicking_a_board_row_focuses_that_board() {
+        let mut a = busy_market();
+        a.dashboard.focus = DashFocus::Sectors;
+        put(&a, 4, Target::BoardRow { board: 1, row: 2 }, Zone::Board(1));
+
+        click(&mut a, 3, 4);
+        assert_eq!(a.dashboard.focus, DashFocus::Boards);
+        assert_eq!(a.dashboard.board, 1);
+        assert_eq!(a.dashboard.cursor, 2);
+        assert!(!a.selected.is_empty());
+    }
+
+    #[test]
+    fn double_clicking_a_sector_filters_the_screener() {
+        let mut a = many_sectors(10);
+        put(&a, 3, Target::SectorRow(2), Zone::Sectors);
+
+        click(&mut a, 3, 3);
+        assert_eq!(a.dashboard.sector, 2);
+        assert_eq!(a.screen, Screen::Dashboard);
+
+        let target = a.sector_at_cursor().unwrap().name;
+        click(&mut a, 3, 3);
+        assert_eq!(a.screen, Screen::Screener);
+        assert_eq!(a.sector_filter.as_deref(), Some(target.as_str()));
+    }
+
+    #[test]
+    fn clicking_chart_controls_matches_the_keys() {
+        let mut a = app();
+        a.chart.range = Range::D5;
+        put(&a, 2, Target::ChartRange(5), Zone::Chart);
+        click(&mut a, 3, 2);
+        assert_eq!(a.chart.range, Range::ALL[5]);
+
+        a.hits.borrow_mut().clear();
+        put(&a, 2, Target::ChartStyle, Zone::Chart);
+        let before = a.chart.style;
+        click(&mut a, 3, 2);
+        assert_eq!(a.chart.style, before.next());
+    }
+
+    #[test]
+    fn clicking_empty_panel_space_still_moves_focus() {
+        let mut a = app();
+        a.hits.borrow_mut().zone(
+            ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 10,
+            },
+            Zone::Sectors,
+        );
+        // No target here, only the zone.
+        click(&mut a, 5, 5);
+        assert_eq!(a.dashboard.focus, DashFocus::Sectors);
+    }
+
+    #[test]
+    fn a_click_dismisses_the_help_overlay_without_reaching_beneath_it() {
+        let mut a = app();
+        put(&a, 1, Target::Tab(3), Zone::Screener);
+        a.show_help = true;
+
+        click(&mut a, 3, 1);
+        assert!(!a.show_help);
+        assert_eq!(
+            a.screen,
+            Screen::Dashboard,
+            "the click must not fall through to the tab underneath"
+        );
+    }
+
+    #[test]
+    fn capital_m_toggles_mouse_reporting() {
+        let mut a = app();
+        assert!(a.mouse_enabled);
+        a.on_key(key('M'));
+        assert!(!a.mouse_enabled);
+        assert!(a.status.contains("selection"));
+        a.on_key(key('M'));
+        assert!(a.mouse_enabled);
+    }
+
+    #[test]
+    fn step_and_keep_visible_are_bounded() {
+        assert_eq!(step(0, -5, 10), 0);
+        assert_eq!(step(9, 5, 10), 9);
+        assert_eq!(step(0, 0, 0), 0, "an empty list has no cursor");
+        assert_eq!(step(5, -2, 10), 3);
+
+        // The window slides the least amount that reveals the cursor.
+        assert_eq!(keep_visible(0, 0, 10), 0);
+        assert_eq!(keep_visible(12, 0, 10), 3);
+        assert_eq!(keep_visible(2, 5, 10), 2);
+        assert_eq!(keep_visible(7, 5, 10), 5, "already visible, do not move");
     }
 
     #[test]

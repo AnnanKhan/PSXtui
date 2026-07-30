@@ -12,6 +12,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Rectangle};
 use ratatui::widgets::{Block, Paragraph};
 
+use super::hit::{Target, Zone};
 use super::{theme, widgets};
 use crate::analysis::indicators;
 use crate::app::{App, ChartStyle, Pane, Range};
@@ -124,17 +125,37 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         top.push(Span::styled(theme::compact(b.volume), theme::value_style()));
     }
 
-    // Range selector, active entry highlighted.
+    // Range selector, active entry highlighted. The x position of each label
+    // is tracked as it is laid out so the buttons can be clicked — the header
+    // is a hand-built line, so nothing else knows where they landed.
+    // Row 1 of the panel's interior holds this line.
+    let button_y = inner.y + 1;
+    let mut x = inner.x + " Range ".len() as u16;
     let mut ranges = vec![Span::styled(" Range ", theme::label_style())];
-    for r in Range::ALL {
-        let style = if r == app.chart.range {
+    for (i, r) in Range::ALL.iter().enumerate() {
+        let style = if *r == app.chart.range {
             Style::new().fg(theme::ACCENT).bold()
         } else {
             Style::new().fg(theme::DIM)
         };
-        ranges.push(Span::styled(format!("{} ", r.label()), style));
+        let text = format!("{} ", r.label());
+        let w = text.chars().count() as u16;
+        if button_y < inner.bottom() && x < inner.right() {
+            app.hits.borrow_mut().target(
+                Rect {
+                    x,
+                    y: button_y,
+                    width: w.min(inner.right() - x),
+                    height: 1,
+                },
+                Target::ChartRange(i),
+            );
+        }
+        x = x.saturating_add(w);
+        ranges.push(Span::styled(text, style));
     }
     ranges.push(Span::styled("  Overlays ", theme::label_style()));
+    x = x.saturating_add("  Overlays ".len() as u16);
     for (on, label) in [
         (app.chart.show_sma, "SMA20"),
         (app.chart.show_ema, "EMA50"),
@@ -143,8 +164,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         (app.chart.show_ichimoku, "ICHI"),
         (app.chart.show_levels, "S/R"),
     ] {
+        let text = format!("{label} ");
+        x = x.saturating_add(text.chars().count() as u16);
         ranges.push(Span::styled(
-            format!("{label} "),
+            text,
             if on {
                 Style::new().fg(theme::ACCENT)
             } else {
@@ -153,8 +176,22 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         ));
     }
     ranges.push(Span::styled("  Style ", theme::label_style()));
+    x = x.saturating_add("  Style ".len() as u16);
+    let style_label = app.chart.style.label();
+    let style_w = style_label.chars().count() as u16 + 4; // label + " (c) "
+    if button_y < inner.bottom() && x < inner.right() {
+        app.hits.borrow_mut().target(
+            Rect {
+                x,
+                y: button_y,
+                width: style_w.min(inner.right() - x),
+                height: 1,
+            },
+            Target::ChartStyle,
+        );
+    }
     ranges.push(Span::styled(
-        app.chart.style.label(),
+        style_label,
         Style::new().fg(theme::ACCENT).bold(),
     ));
     ranges.push(Span::styled(" (c) ", Style::new().fg(theme::DIM)));
@@ -422,6 +459,7 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
             }
         });
 
+    app.hits.borrow_mut().zone(area, Zone::Chart);
     f.render_widget(canvas, plot_area);
     draw_date_labels(f, plot_area, bars, &buckets);
 }
@@ -557,6 +595,20 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     let block = widgets::panel(app.chart.pane.label());
     let inner = block.inner(area);
     f.render_widget(block, area);
+
+    // The panel title doubles as the pane selector, like the `i` key.
+    if area.width > 2 {
+        let w = app.chart.pane.label().chars().count() as u16 + 2;
+        app.hits.borrow_mut().target(
+            Rect {
+                x: area.x + 1,
+                y: area.y,
+                width: w.min(area.width - 1),
+                height: 1,
+            },
+            Target::ChartPane,
+        );
+    }
     if inner.height == 0 || inner.width <= AXIS_WIDTH {
         return;
     }

@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
+use super::hit::Zone;
 use super::{theme, widgets};
 use crate::analysis::stats;
 use crate::app::App;
@@ -138,6 +139,7 @@ fn draw_commodities(f: &mut Frame, area: Rect, app: &App) {
     let end = (offset + budget).min(all.len());
     let visible: Vec<Line> = all[offset..end].to_vec();
 
+    app.hits.borrow_mut().zone(area, Zone::MacroSeries);
     f.render_widget(Paragraph::new(Text::from(visible)), inner);
 
     // Show that there is more above or below, so a cut-off crypto section
@@ -452,6 +454,7 @@ fn draw_news(f: &mut Frame, area: Rect, app: &App) {
     });
     let inner = block.inner(area);
     f.render_widget(block, area);
+    app.hits.borrow_mut().zone(area, Zone::MacroNews);
     if inner.height == 0 || inner.width == 0 {
         return;
     }

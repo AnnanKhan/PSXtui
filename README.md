@@ -53,6 +53,18 @@ Press `?` in the app for the full list.
 | `c` | Chart style: candles → line → dots → area |
 | `m` / `e` / `b` | Toggle SMA / EMA / Bollinger overlays |
 | `r` | Refresh · `q` quit |
+| `M` | Mouse on/off (off restores terminal text selection) |
+
+### Mouse
+
+Click a tab to switch screen, a row to select it, and double-click to open it in
+the chart. The wheel scrolls whatever list is under the pointer, and over the
+chart it changes timeframe. Chart range buttons, the style indicator and the
+indicator-pane title are all clickable.
+
+Mouse reporting takes over the terminal's own text selection, so `M` turns it
+off when you want to copy something out (holding Shift also works in most
+terminals).
 
 ## How it gets data
 

@@ -6,6 +6,7 @@ pub mod chart;
 pub mod company;
 pub mod compare;
 pub mod dashboard;
+pub mod hit;
 pub mod intraday;
 pub mod macro_;
 pub mod screener;
@@ -26,6 +27,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         Constraint::Length(1),
     ])
     .areas(f.area());
+
+    // Everything the mouse can act on is registered fresh each frame, because
+    // only the renderer knows where things ended up.
+    app.hits.borrow_mut().clear();
 
     draw_ticker(f, ticker, app);
     draw_tabs(f, tabs, app);
@@ -87,6 +92,12 @@ fn draw_ticker(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
+    let labels: Vec<String> = Screen::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("{} {}", i + 1, s.title()))
+        .collect();
+
     let titles: Vec<Line> = Screen::ALL
         .iter()
         .enumerate()
@@ -105,6 +116,29 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         .divider(Span::styled("│", theme::border_style()));
 
     f.render_widget(tabs, area);
+
+    // Mirror the widget's own geometry so a click lands on the tab under the
+    // pointer: Tabs pads each title with one space either side and separates
+    // them with a single-column divider.
+    let mut x = area.x;
+    for (i, label) in labels.iter().enumerate() {
+        let w = label.chars().count() as u16 + 2;
+        if x >= area.right() {
+            break;
+        }
+        let width = w.min(area.right() - x);
+        app.hits.borrow_mut().target(
+            Rect {
+                x,
+                y: area.y,
+                width,
+                height: 1,
+            },
+            hit::Target::Tab(i),
+        );
+        // Advance past this tab and its divider.
+        x = x.saturating_add(w).saturating_add(1);
+    }
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
@@ -326,12 +360,19 @@ fn draw_help(f: &mut Frame) {
 
     let text = Text::from(vec![
         Line::raw(""),
+        section("Mouse"),
+        bind("click", "tab to switch screen · row to select"),
+        bind("double-click", "open a row in the chart"),
+        bind("wheel", "scroll the list under the pointer"),
+        bind("wheel on chart", "change timeframe"),
+        Line::raw(""),
         section("Global"),
         bind("1 – 6", "jump to screen"),
         bind("Tab / S-Tab", "cycle screens"),
         bind("/", "search symbol, company or sector"),
         bind("r", "refresh market data"),
         bind("w", "toggle watchlist for current symbol"),
+        bind("M", "mouse on/off (off restores text selection)"),
         bind("?", "this help"),
         bind("q / Ctrl-C", "quit"),
         Line::raw(""),
@@ -388,4 +429,123 @@ fn draw_help(f: &mut Frame) {
         Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{DataEvent, Screen, detached_channel};
+    use crate::cache::Store;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::sync::Arc;
+
+    fn app() -> App {
+        let (tx, _rx) = detached_channel();
+        App::new(Arc::new(Store::open_in_memory().unwrap()), tx)
+    }
+
+    fn render(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    /// The tab row as plain text.
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn every_tab_is_clickable_where_it_is_drawn() {
+        // The hit rects mirror the Tabs widget's own padding and dividers by
+        // hand, so this checks them against what was actually rendered rather
+        // than against the arithmetic that produced them.
+        let app = app();
+        let buf = render(&app, 160, 24);
+        let text = row_text(&buf, 1);
+
+        for (i, screen) in Screen::ALL.iter().enumerate() {
+            let title = screen.title();
+            // `find` gives a byte offset, and the divider glyph is three
+            // bytes, so byte offsets drift from screen columns. Convert.
+            let byte = text
+                .find(title)
+                .unwrap_or_else(|| panic!("{title} was not drawn: {text:?}"));
+            let col = text[..byte].chars().count() as u16;
+            // Probe the middle of the label, away from padding and dividers.
+            let probe = col + (title.len() as u16) / 2;
+            assert_eq!(
+                app.hits.borrow().target_at(probe, 1),
+                Some(hit::Target::Tab(i)),
+                "clicking {title} at column {probe} should select tab {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hit_map_is_rebuilt_each_frame() {
+        let app = app();
+        render(&app, 160, 24);
+        let first = app.hits.borrow().target_at(3, 1);
+        assert!(first.is_some());
+
+        // Rendering again must not accumulate duplicates or stale entries.
+        render(&app, 160, 24);
+        assert_eq!(app.hits.borrow().target_at(3, 1), first);
+
+        // A narrower frame drops the tabs that no longer fit.
+        render(&app, 20, 10);
+        assert_eq!(app.hits.borrow().target_at(150, 1), None);
+    }
+
+    #[test]
+    fn screener_rows_are_clickable_where_they_are_drawn() {
+        let mut app = app();
+        app.on_event(DataEvent::Quotes(
+            (0..30)
+                .map(|i| crate::model::Quote {
+                    symbol: format!("S{i:02}"),
+                    sector: "BANKS".into(),
+                    indices: vec![],
+                    ldcp: 10.0,
+                    open: 10.0,
+                    high: 10.0,
+                    low: 10.0,
+                    current: 10.0 + i as f64,
+                    change: 0.0,
+                    change_pct: i as f64,
+                    volume: 100.0,
+                })
+                .collect(),
+        ));
+        app.screener.equities_only = false;
+        app.screen = Screen::Screener;
+
+        let buf = render(&app, 160, 30);
+        // Find a row by its symbol and confirm the hit map agrees.
+        let target = app.visible_quotes()[0].symbol.clone();
+        let y = (0..buf.area.height)
+            .find(|y| row_text(&buf, *y).contains(&target))
+            .expect("first row should be drawn");
+
+        assert_eq!(
+            app.hits.borrow().target_at(4, y),
+            Some(hit::Target::ScreenerRow(0)),
+            "row 0 is drawn at y={y} but is not clickable there"
+        );
+    }
+
+    #[test]
+    fn rendering_every_screen_registers_hits_without_panicking() {
+        let mut app = app();
+        for screen in Screen::ALL {
+            app.screen = screen;
+            for (w, h) in [(20u16, 10u16), (80, 24), (200, 60)] {
+                render(&app, w, h);
+            }
+        }
+    }
 }

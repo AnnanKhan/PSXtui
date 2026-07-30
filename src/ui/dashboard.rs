@@ -11,6 +11,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
+use super::hit::{Target, Zone};
 use crate::app::{App, Board, DashFocus, DashLayout, SectorAgg};
 use crate::model::Quote;
 
@@ -361,6 +362,7 @@ fn quote_line(q: &Quote, width: usize, by_value: bool, selected: bool) -> Line<'
 }
 
 /// Draw one leaderboard. `cursor` is `Some(row)` only for the focused board.
+#[allow(clippy::too_many_arguments)]
 fn draw_quote_list(
     f: &mut Frame,
     area: Rect,
@@ -368,6 +370,8 @@ fn draw_quote_list(
     rows: &[&Quote],
     by_value: bool,
     cursor: Option<usize>,
+    app: &App,
+    board_index: usize,
 ) {
     let block = widgets::panel(title);
     let inner = block.inner(area);
@@ -391,6 +395,29 @@ fn draw_quote_list(
             lines.push(quote_line(q, w, by_value, cursor == Some(i)));
         }
     }
+
+    // The whole panel scrolls; individual rows are clickable. The header line
+    // is offset past so a click lands on the row it appears to.
+    let header_rows = u16::from(inner.height >= 3);
+    let mut hits = app.hits.borrow_mut();
+    hits.zone(area, Zone::Board(board_index));
+    if !rows.is_empty() && inner.height > header_rows {
+        hits.rows(
+            Rect {
+                x: inner.x,
+                y: inner.y + header_rows,
+                width: inner.width,
+                height: inner.height - header_rows,
+            },
+            0,
+            rows.len(),
+            move |row| Target::BoardRow {
+                board: board_index,
+                row,
+            },
+        );
+    }
+    drop(hits);
 
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -452,6 +479,8 @@ fn draw_lists(f: &mut Frame, area: Rect, app: &App) {
             &rows,
             *board == Board::Active,
             selected,
+            app,
+            i,
         );
     }
 }
@@ -563,6 +592,8 @@ fn draw_sectors(f: &mut Frame, area: Rect, app: &App) {
     let max_offset = sectors.len().saturating_sub(visible);
     let offset = app.dashboard.sector_offset.min(max_offset);
 
+    app.hits.borrow_mut().zone(area, Zone::Sectors);
+
     for (i, col) in col_areas.iter().enumerate() {
         if col.width == 0 || col.height == 0 {
             continue;
@@ -572,6 +603,12 @@ fn draw_sectors(f: &mut Frame, area: Rect, app: &App) {
             break;
         }
         let end = (start + per_col).min(sectors.len());
+
+        // Each column carries its own slice of the list, so hit rows are
+        // numbered from that column's own start rather than the panel's.
+        app.hits
+            .borrow_mut()
+            .rows(*col, start, end - start, Target::SectorRow);
         let lines: Vec<Line> = sectors[start..end]
             .iter()
             .enumerate()

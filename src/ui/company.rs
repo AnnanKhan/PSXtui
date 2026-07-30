@@ -8,6 +8,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Cell, Paragraph, Row, Table, Tabs, Wrap};
 
+use super::hit::{Target, Zone};
 use super::{theme, widgets};
 use crate::app::{App, CompanyTab};
 use crate::model::{Announcement, Company, FinancialPeriod, RatioPeriod};
@@ -53,7 +54,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         CompanyTab::Profile => draw_profile(f, body, company),
         CompanyTab::Financials => draw_financials(f, body, company),
         CompanyTab::Ratios => draw_ratios(f, body, company),
-        CompanyTab::Announcements => draw_announcements(f, body, company, app.announcement_cursor),
+        CompanyTab::Announcements => {
+            draw_announcements(f, body, company, app.announcement_cursor, app)
+        }
     }
 }
 
@@ -115,6 +118,26 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         .divider(Span::styled("│", theme::border_style()));
 
     f.render_widget(tabs, area);
+
+    // Mirror the widget's geometry: one space of padding either side of each
+    // title, one column of divider between them.
+    let mut x = area.x;
+    for (i, t) in CompanyTab::ALL.iter().enumerate() {
+        let w = t.label().chars().count() as u16 + 2;
+        if x >= area.right() {
+            break;
+        }
+        app.hits.borrow_mut().target(
+            Rect {
+                x,
+                y: area.y,
+                width: w.min(area.right() - x),
+                height: 1,
+            },
+            Target::CompanyTab(i),
+        );
+        x = x.saturating_add(w).saturating_add(1);
+    }
 }
 
 // --- profile -------------------------------------------------------------
@@ -430,7 +453,7 @@ fn draw_grid(f: &mut Frame, area: Rect, title: &str, cols: &[Column<'_>], scale:
 
 // --- announcements -------------------------------------------------------
 
-fn draw_announcements(f: &mut Frame, area: Rect, c: &Company, cursor: usize) {
+fn draw_announcements(f: &mut Frame, area: Rect, c: &Company, cursor: usize, app: &App) {
     let block = widgets::panel("Announcements");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -486,6 +509,25 @@ fn draw_announcements(f: &mut Frame, area: Rect, c: &Company, cursor: usize) {
 
     if list_area.height > 0 {
         f.render_widget(table, list_area);
+
+        // The announcements table is unscrolled — it renders from the top —
+        // so hit rows start at zero, past the header line.
+        let header_rows = u16::from(list_area.height >= 2);
+        let mut hits = app.hits.borrow_mut();
+        hits.zone(list_area, Zone::Announcements);
+        if list_area.height > header_rows {
+            hits.rows(
+                Rect {
+                    x: list_area.x,
+                    y: list_area.y + header_rows,
+                    width: list_area.width,
+                    height: list_area.height - header_rows,
+                },
+                0,
+                c.announcements.len(),
+                Target::Announcement,
+            );
+        }
     }
 
     if detail_area.height == 0 {

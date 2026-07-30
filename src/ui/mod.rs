@@ -219,14 +219,38 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let left = Paragraph::new(Line::from(spans));
-    let right = Paragraph::new(Line::from(vec![Span::styled(
-        "? help  q quit ",
-        theme::label_style(),
-    )]))
-    .alignment(Alignment::Right);
+    const HINT: &str = "? help  q quit ";
+    let right = Paragraph::new(Line::from(vec![Span::styled(HINT, theme::label_style())]))
+        .alignment(Alignment::Right);
 
     f.render_widget(left, area);
     f.render_widget(right, area);
+
+    // The hint reads as two buttons, so make it behave as two. Right-aligned,
+    // so positions are measured back from the right edge.
+    let hint_w = HINT.len() as u16;
+    if area.width > hint_w {
+        let start = area.right() - hint_w;
+        let mut hits = app.hits.borrow_mut();
+        hits.target(
+            Rect {
+                x: start,
+                y: area.y,
+                width: 7, // "? help "
+                height: 1,
+            },
+            hit::Target::Help,
+        );
+        hits.target(
+            Rect {
+                x: start + 8,
+                y: area.y,
+                width: 7, // "q quit "
+                height: 1,
+            },
+            hit::Target::Quit,
+        );
+    }
 }
 
 /// First-run overlay.
@@ -353,7 +377,7 @@ fn draw_help(f: &mut Frame) {
     };
     let bind = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("    {k:<14}"), Style::new().fg(theme::FG)),
+            Span::styled(format!("    {k:<16}"), Style::new().fg(theme::FG)),
             Span::styled(d.to_string(), theme::label_style()),
         ])
     };
@@ -546,6 +570,109 @@ mod tests {
             for (w, h) in [(20u16, 10u16), (80, 24), (200, 60)] {
                 render(&app, w, h);
             }
+        }
+    }
+
+    #[test]
+    fn sort_headers_are_clickable_where_they_are_drawn() {
+        let mut app = app();
+        app.on_event(DataEvent::Quotes(
+            (0..5)
+                .map(|i| crate::model::Quote {
+                    symbol: format!("S{i:02}"),
+                    sector: "BANKS".into(),
+                    indices: vec![],
+                    ldcp: 10.0,
+                    open: 10.0,
+                    high: 10.0,
+                    low: 10.0,
+                    current: 10.0,
+                    change: 0.0,
+                    change_pct: i as f64,
+                    volume: 100.0,
+                })
+                .collect(),
+        ));
+        app.screener.equities_only = false;
+        app.screen = Screen::Screener;
+
+        let buf = render(&app, 160, 20);
+        let header_y = (0..buf.area.height)
+            .find(|y| row_text(&buf, *y).contains("SYMBOL"))
+            .expect("header should be drawn");
+
+        // The VOLUME header must map to the Volume sort key.
+        let text = row_text(&buf, header_y);
+        let byte = text.find("VOLUME").expect("VOLUME column");
+        let col = text[..byte].chars().count() as u16;
+
+        let want = app
+            .sort_keys()
+            .iter()
+            .position(|k| *k == crate::app::SortKey::Volume)
+            .unwrap();
+        assert_eq!(
+            app.hits.borrow().target_at(col + 2, header_y),
+            Some(hit::Target::SortColumn(want)),
+            "VOLUME is drawn at column {col} but is not clickable there"
+        );
+    }
+
+    #[test]
+    fn chart_overlay_labels_are_clickable_where_they_are_drawn() {
+        let mut app = app();
+        app.screen = Screen::Chart;
+        app.selected = "HBL".into();
+        app.bars = (0..60)
+            .map(|i| crate::model::Bar {
+                ts: i as i64 * 86_400,
+                open: 10.0,
+                high: 11.0,
+                low: 9.0,
+                close: 10.0 + i as f64,
+                volume: 100.0,
+            })
+            .collect();
+
+        let buf = render(&app, 160, 30);
+        let y = (0..buf.area.height)
+            .find(|y| row_text(&buf, *y).contains("Overlays"))
+            .expect("overlay row should be drawn");
+
+        let text = row_text(&buf, y);
+        for (i, label) in ["SMA20", "EMA50", "BB20", "DC20", "ICHI", "S/R"]
+            .iter()
+            .enumerate()
+        {
+            let byte = text
+                .find(label)
+                .unwrap_or_else(|| panic!("{label} missing"));
+            let col = text[..byte].chars().count() as u16;
+            assert_eq!(
+                app.hits.borrow().target_at(col + 1, y),
+                Some(hit::Target::ChartOverlay(i)),
+                "{label} drawn at column {col} is not clickable there"
+            );
+        }
+    }
+
+    #[test]
+    fn help_and_quit_are_clickable_where_they_are_drawn() {
+        let app = app();
+        let buf = render(&app, 160, 24);
+        let y = buf.area.height - 1;
+        let text = row_text(&buf, y);
+
+        for (needle, want) in [("? help", hit::Target::Help), ("q quit", hit::Target::Quit)] {
+            let byte = text
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing"));
+            let col = text[..byte].chars().count() as u16;
+            assert_eq!(
+                app.hits.borrow().target_at(col + 1, y),
+                Some(want),
+                "{needle} drawn at column {col} is not clickable there"
+            );
         }
     }
 }

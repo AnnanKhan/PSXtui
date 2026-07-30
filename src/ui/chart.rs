@@ -156,16 +156,31 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     }
     ranges.push(Span::styled("  Overlays ", theme::label_style()));
     x = x.saturating_add("  Overlays ".len() as u16);
-    for (on, label) in [
+    for (i, (on, label)) in [
         (app.chart.show_sma, "SMA20"),
         (app.chart.show_ema, "EMA50"),
         (app.chart.show_bollinger, "BB20"),
         (app.chart.show_donchian, "DC20"),
         (app.chart.show_ichimoku, "ICHI"),
         (app.chart.show_levels, "S/R"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let text = format!("{label} ");
-        x = x.saturating_add(text.chars().count() as u16);
+        let w = text.chars().count() as u16;
+        if button_y < inner.bottom() && x < inner.right() {
+            app.hits.borrow_mut().target(
+                Rect {
+                    x,
+                    y: button_y,
+                    width: w.min(inner.right() - x),
+                    height: 1,
+                },
+                Target::ChartOverlay(i),
+            );
+        }
+        x = x.saturating_add(w);
         ranges.push(Span::styled(
             text,
             if on {

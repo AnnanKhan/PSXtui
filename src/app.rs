@@ -1170,6 +1170,16 @@ impl App {
         self.fundamentals = load_fundamentals(&self.store);
     }
 
+    /// The sort columns the screener is currently offering, which depends on
+    /// whether the valuation view is showing.
+    pub fn sort_keys(&self) -> &'static [SortKey] {
+        if self.screener.valuation {
+            &SortKey::VALUATION
+        } else {
+            &SortKey::ALL
+        }
+    }
+
     // --- dashboard -------------------------------------------------------
 
     /// Rows of one leaderboard, capped at `n`.
@@ -1504,6 +1514,37 @@ impl App {
                     self.chart.range = *r;
                 }
             }
+            // Same order as the header lays them out.
+            Target::ChartOverlay(i) => {
+                let flag = match i {
+                    0 => &mut self.chart.show_sma,
+                    1 => &mut self.chart.show_ema,
+                    2 => &mut self.chart.show_bollinger,
+                    3 => &mut self.chart.show_donchian,
+                    4 => &mut self.chart.show_ichimoku,
+                    5 => &mut self.chart.show_levels,
+                    _ => return,
+                };
+                *flag = !*flag;
+            }
+
+            Target::SortColumn(i) => {
+                // Clicking the active column reverses it, as a spreadsheet
+                // does; clicking a different one sorts by that column.
+                if let Some(key) = self.sort_keys().get(i).copied() {
+                    if self.screener.sort == key {
+                        self.screener.descending = !self.screener.descending;
+                    } else {
+                        self.screener.sort = key;
+                        self.screener.descending = key != SortKey::Symbol;
+                    }
+                    self.screener.cursor = 0;
+                }
+            }
+
+            Target::Help => self.show_help = true,
+            Target::Quit => self.should_quit = true,
+
             Target::ChartStyle => self.chart.style = self.chart.style.next(),
             Target::ChartPane => {
                 let i = Pane::ALL
@@ -3230,6 +3271,110 @@ mod tests {
             Screen::Dashboard,
             "the click must not fall through to the tab underneath"
         );
+    }
+
+    #[test]
+    fn clicking_overlay_labels_toggles_them() {
+        let mut a = app();
+        let before = (
+            a.chart.show_sma,
+            a.chart.show_ema,
+            a.chart.show_bollinger,
+            a.chart.show_donchian,
+            a.chart.show_ichimoku,
+            a.chart.show_levels,
+        );
+
+        for i in 0..6 {
+            a.hits.borrow_mut().clear();
+            put(&a, 2, Target::ChartOverlay(i), Zone::Chart);
+            click(&mut a, 3, 2);
+        }
+
+        assert_eq!(
+            (
+                a.chart.show_sma,
+                a.chart.show_ema,
+                a.chart.show_bollinger,
+                a.chart.show_donchian,
+                a.chart.show_ichimoku,
+                a.chart.show_levels,
+            ),
+            (
+                !before.0, !before.1, !before.2, !before.3, !before.4, !before.5
+            ),
+            "each overlay label must toggle its own flag"
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_overlay_index_is_ignored() {
+        let mut a = app();
+        let before = a.chart.show_sma;
+        put(&a, 2, Target::ChartOverlay(99), Zone::Chart);
+        click(&mut a, 3, 2);
+        assert_eq!(a.chart.show_sma, before);
+    }
+
+    #[test]
+    fn clicking_a_sort_header_sorts_then_reverses() {
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(vec![
+            quote("AAA", 10.0, 5.0, 100.0),
+            quote("BBB", 20.0, -5.0, 200.0),
+        ]));
+        a.screener.equities_only = false;
+        a.screener.sort = SortKey::Turnover;
+
+        let change = a
+            .sort_keys()
+            .iter()
+            .position(|k| *k == SortKey::Change)
+            .unwrap();
+
+        put(&a, 1, Target::SortColumn(change), Zone::Screener);
+        click(&mut a, 3, 1);
+        assert_eq!(a.screener.sort, SortKey::Change);
+        assert!(a.screener.descending, "a fresh column sorts high-to-low");
+        assert_eq!(a.visible_quotes()[0].symbol, "AAA");
+
+        // Clicking the active column reverses it.
+        click(&mut a, 3, 1);
+        assert_eq!(a.screener.sort, SortKey::Change);
+        assert!(!a.screener.descending);
+        assert_eq!(a.visible_quotes()[0].symbol, "BBB");
+    }
+
+    #[test]
+    fn clicking_the_symbol_header_sorts_ascending_first() {
+        // Alphabetical is the one column where high-to-low is the wrong
+        // default.
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(vec![quote("AAA", 10.0, 1.0, 100.0)]));
+        let sym = a
+            .sort_keys()
+            .iter()
+            .position(|k| *k == SortKey::Symbol)
+            .unwrap();
+        put(&a, 1, Target::SortColumn(sym), Zone::Screener);
+        click(&mut a, 3, 1);
+        assert_eq!(a.screener.sort, SortKey::Symbol);
+        assert!(!a.screener.descending);
+    }
+
+    #[test]
+    fn clicking_help_and_quit_works() {
+        let mut a = app();
+        put(&a, 9, Target::Help, Zone::Screener);
+        click(&mut a, 3, 9);
+        assert!(a.show_help);
+
+        // The overlay swallows the next click, so dismiss it first.
+        a.show_help = false;
+        a.hits.borrow_mut().clear();
+        put(&a, 9, Target::Quit, Zone::Screener);
+        click(&mut a, 3, 9);
+        assert!(a.should_quit);
     }
 
     #[test]

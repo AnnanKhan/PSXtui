@@ -33,6 +33,14 @@ pub enum Target {
     Announcement(usize),
     /// A chart range button by index into `Range::ALL`.
     ChartRange(usize),
+    /// A chart overlay toggle, by index into the header's overlay list.
+    ChartOverlay(usize),
+    /// The screener's sort-column header.
+    SortColumn(usize),
+    /// The status bar's help affordance.
+    Help,
+    /// The status bar's quit affordance.
+    Quit,
     /// The chart's style indicator — clicking cycles it, like `c`.
     ChartStyle,
     /// The chart's indicator pane title — clicking cycles it, like `i`.

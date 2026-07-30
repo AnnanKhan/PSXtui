@@ -540,6 +540,33 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let header_rows = u16::from(inner.height >= 2);
     let mut hits = app.hits.borrow_mut();
     hits.zone(area, Zone::Screener);
+
+    // Sortable headers are clickable. Columns are fixed-width with one column
+    // of spacing, so their positions follow directly from the widths chosen
+    // above — the same list the table was built from, so the two cannot drift.
+    if header_rows == 1 {
+        let keys = app.sort_keys();
+        let mut hx = inner.x;
+        for (col, w) in &cols {
+            if hx >= inner.right() {
+                break;
+            }
+            if let Some(key) = col.sort_key()
+                && let Some(i) = keys.iter().position(|k| *k == key)
+            {
+                hits.target(
+                    Rect {
+                        x: hx,
+                        y: inner.y,
+                        width: (*w).min(inner.right() - hx),
+                        height: 1,
+                    },
+                    Target::SortColumn(i),
+                );
+            }
+            hx = hx.saturating_add(*w).saturating_add(1);
+        }
+    }
     if inner.height > header_rows {
         hits.rows(
             Rect {

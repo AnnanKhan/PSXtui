@@ -49,6 +49,28 @@ pub enum Target {
     MacroRow(usize),
     /// A headline row.
     NewsRow(usize),
+    /// A comparison range button by index into `Range::ALL`.
+    CompareRange(usize),
+    /// A symbol chip in the comparison header, by index into the compared set.
+    CompareSymbol(usize),
+    /// One of the screener's filter or sort affordances.
+    ScreenerToggle(Toggle),
+}
+
+/// A screener switch that the footer or the panel title draws.
+///
+/// Each one has a key already; the mouse targets name the same switches so the
+/// two paths stay in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toggle {
+    /// Price columns versus the valuation view — the `f` key.
+    Valuation,
+    /// Ascending versus descending — the `S` key.
+    SortDirection,
+    /// Watchlist members only — the `W` key.
+    Watchlist,
+    /// Equities only — the `e` key.
+    Equities,
 }
 
 /// A scrollable or focusable panel.
@@ -61,6 +83,8 @@ pub enum Zone {
     MacroSeries,
     MacroNews,
     Chart,
+    /// The comparison plot, where the wheel changes the range as on the chart.
+    Compare,
 }
 
 /// What the renderer drew, and where.

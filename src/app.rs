@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::cache::Store;
 use crate::ext::{Headline, MacroRates, MacroSeries};
 use crate::model::{Bar, Company, Index, Quote, SymbolInfo, Tick};
-use crate::ui::hit::{HitMap, Target, Zone};
+use crate::ui::hit::{HitMap, Target, Toggle, Zone};
 
 /// The benchmark every risk statistic is measured against.
 pub const BENCHMARK: &str = "KSE100";
@@ -1170,6 +1170,35 @@ impl App {
         self.fundamentals = load_fundamentals(&self.store);
     }
 
+    /// Flip one of the screener's switches.
+    ///
+    /// Shared by the keys and by the footer's click targets so a switch cannot
+    /// mean one thing to the keyboard and another to the mouse. Every one of
+    /// them changes what the board contains or how it is ordered, so the cursor
+    /// goes back to the top rather than pointing at an unrelated row.
+    pub fn toggle(&mut self, toggle: Toggle) {
+        match toggle {
+            Toggle::Valuation => {
+                self.screener.valuation = !self.screener.valuation;
+                // Pick up any profile that has landed since start-up.
+                self.reload_fundamentals();
+                // Leave the sort alone unless it names a column the new view
+                // does not have.
+                if self.screener.valuation {
+                    if !SortKey::VALUATION.contains(&self.screener.sort) {
+                        self.screener.sort = SortKey::MarketCap;
+                    }
+                } else if !SortKey::ALL.contains(&self.screener.sort) {
+                    self.screener.sort = SortKey::Turnover;
+                }
+            }
+            Toggle::SortDirection => self.screener.descending = !self.screener.descending,
+            Toggle::Watchlist => self.screener.watchlist_only = !self.screener.watchlist_only,
+            Toggle::Equities => self.screener.equities_only = !self.screener.equities_only,
+        }
+        self.screener.cursor = 0;
+    }
+
     /// The sort columns the screener is currently offering, which depends on
     /// whether the valuation view is showing.
     pub fn sort_keys(&self) -> &'static [SortKey] {
@@ -1542,6 +1571,32 @@ impl App {
                 }
             }
 
+            Target::CompareRange(i) => {
+                if let Some(r) = Range::ALL.get(i) {
+                    self.compare.range = *r;
+                }
+            }
+            // Click to inspect — the rest of the app follows the selection —
+            // and click the same chip again to drop it from the overlay.
+            Target::CompareSymbol(i) => {
+                let set = self.compare_symbols();
+                if let Some(symbol) = set.get(i).cloned() {
+                    if double {
+                        self.compare_toggle(&symbol);
+                    } else {
+                        // Pin what is on screen before selecting. An uncurated
+                        // set is seeded from the selection, so selecting out of
+                        // it would reorder the chips under the pointer — and
+                        // the second click of a double would land on a
+                        // different symbol than the one that was aimed at.
+                        self.compare.symbols = set;
+                        self.select(symbol);
+                    }
+                }
+            }
+
+            Target::ScreenerToggle(t) => self.toggle(t),
+
             Target::Help => self.show_help = true,
             Target::Quit => self.should_quit = true,
 
@@ -1575,7 +1630,7 @@ impl App {
             Zone::Sectors => self.dashboard.focus = DashFocus::Sectors,
             Zone::MacroSeries => self.macro_focus = MacroFocus::Series,
             Zone::MacroNews => self.macro_focus = MacroFocus::News,
-            Zone::Screener | Zone::Announcements | Zone::Chart => {}
+            Zone::Screener | Zone::Announcements | Zone::Chart | Zone::Compare => {}
         }
     }
 
@@ -1644,6 +1699,16 @@ impl App {
                 // Scrolling up zooms in, so it walks toward the shorter window.
                 let next = (i + delta.signum()).clamp(0, n - 1);
                 self.chart.range = Range::ALL[next as usize];
+            }
+            // The comparison plot is a chart too, and its wheel reads the same.
+            Zone::Compare => {
+                let i = Range::ALL
+                    .iter()
+                    .position(|r| *r == self.compare.range)
+                    .unwrap_or(0) as isize;
+                let n = Range::ALL.len() as isize;
+                let next = (i + delta.signum()).clamp(0, n - 1);
+                self.compare.range = Range::ALL[next as usize];
             }
         }
     }
@@ -1810,34 +1875,19 @@ impl App {
                 return;
             }
             KeyCode::Char('f') => {
-                self.screener.valuation = !self.screener.valuation;
-                // Pick up any profile that has landed since start-up.
-                self.reload_fundamentals();
-                // Leave the sort alone unless it names a column the new view
-                // does not have.
-                if self.screener.valuation {
-                    if !SortKey::VALUATION.contains(&self.screener.sort) {
-                        self.screener.sort = SortKey::MarketCap;
-                    }
-                } else if !SortKey::ALL.contains(&self.screener.sort) {
-                    self.screener.sort = SortKey::Turnover;
-                }
-                self.screener.cursor = 0;
+                self.toggle(Toggle::Valuation);
                 return;
             }
             KeyCode::Char('S') => {
-                self.screener.descending = !self.screener.descending;
-                self.screener.cursor = 0;
+                self.toggle(Toggle::SortDirection);
                 return;
             }
             KeyCode::Char('W') => {
-                self.screener.watchlist_only = !self.screener.watchlist_only;
-                self.screener.cursor = 0;
+                self.toggle(Toggle::Watchlist);
                 return;
             }
             KeyCode::Char('e') => {
-                self.screener.equities_only = !self.screener.equities_only;
-                self.screener.cursor = 0;
+                self.toggle(Toggle::Equities);
                 return;
             }
             _ => return,
@@ -1931,6 +1981,33 @@ impl App {
         }
     }
 
+    /// Add a symbol to the comparison, or drop it if it is already in.
+    ///
+    /// Shared by the `a` key and by clicking a symbol chip in the header.
+    pub fn compare_toggle(&mut self, symbol: &str) {
+        if symbol.is_empty() {
+            return;
+        }
+        // Editing starts from whatever is on screen, seed included, so the
+        // first edit does not silently discard the view.
+        let mut set = self.compare_symbols();
+        match set.iter().position(|s| s == symbol) {
+            Some(i) => {
+                set.remove(i);
+                self.status = format!("{symbol} removed from comparison");
+            }
+            None if set.len() < MAX_COMPARE => {
+                set.push(symbol.to_string());
+                self.status = format!("{symbol} added to comparison");
+            }
+            None => {
+                self.status = format!("Comparison holds {MAX_COMPARE} symbols — remove one first");
+                return;
+            }
+        }
+        self.compare.symbols = set;
+    }
+
     /// The symbols the Compare screen overlays.
     ///
     /// Until the user curates a set the screen seeds itself: the selected
@@ -1986,29 +2063,8 @@ impl App {
                 self.compare.range = Range::ALL[(i + n - 1) % n];
             }
             KeyCode::Char('a') => {
-                if self.selected.is_empty() {
-                    return;
-                }
-                // Editing starts from whatever is on screen, seed included, so
-                // the first keypress does not silently discard the view.
-                let mut set = self.compare_symbols();
                 let selected = self.selected.clone();
-                match set.iter().position(|s| *s == selected) {
-                    Some(i) => {
-                        set.remove(i);
-                        self.status = format!("{selected} removed from comparison");
-                    }
-                    None if set.len() < MAX_COMPARE => {
-                        set.push(selected.clone());
-                        self.status = format!("{selected} added to comparison");
-                    }
-                    None => {
-                        self.status =
-                            format!("Comparison holds {MAX_COMPARE} symbols — remove one first");
-                        return;
-                    }
-                }
-                self.compare.symbols = set;
+                self.compare_toggle(&selected);
             }
             KeyCode::Char('c') => {
                 self.compare.symbols.clear();
@@ -3156,6 +3212,101 @@ mod tests {
         click(&mut a, 3, 6);
 
         assert_eq!(a.screen, Screen::Dashboard, "different rows must not open");
+    }
+
+    #[test]
+    fn clicking_a_screener_switch_flips_it() {
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(vec![quote("AAA", 10.0, 1.0, 100.0)]));
+        a.screener.equities_only = false;
+        a.screener.cursor = 0;
+
+        put(
+            &a,
+            9,
+            Target::ScreenerToggle(Toggle::Equities),
+            Zone::Screener,
+        );
+        click(&mut a, 3, 9);
+        assert!(a.screener.equities_only);
+
+        a.hits.borrow_mut().clear();
+        put(
+            &a,
+            9,
+            Target::ScreenerToggle(Toggle::SortDirection),
+            Zone::Screener,
+        );
+        let before = a.screener.descending;
+        click(&mut a, 3, 9);
+        assert_eq!(a.screener.descending, !before);
+    }
+
+    #[test]
+    fn clicking_the_screener_heading_swaps_in_the_valuation_columns() {
+        let mut a = app();
+        assert!(!a.screener.valuation);
+        put(
+            &a,
+            0,
+            Target::ScreenerToggle(Toggle::Valuation),
+            Zone::Screener,
+        );
+        click(&mut a, 3, 0);
+        assert!(a.screener.valuation);
+        // The sort has to name a column the new view actually draws.
+        assert!(SortKey::VALUATION.contains(&a.screener.sort));
+    }
+
+    #[test]
+    fn clicking_a_compare_range_selects_it() {
+        let mut a = app();
+        put(&a, 2, Target::CompareRange(3), Zone::Compare);
+        click(&mut a, 3, 2);
+        assert_eq!(a.compare.range, Range::ALL[3]);
+    }
+
+    #[test]
+    fn clicking_a_compare_symbol_selects_it_and_double_click_drops_it() {
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(vec![
+            quote("AAA", 10.0, 1.0, 100.0),
+            quote("BBB", 20.0, 2.0, 200.0),
+        ]));
+        a.screener.equities_only = false;
+        a.selected = "AAA".into();
+
+        let symbols = a.compare_symbols();
+        let second = symbols[1].clone();
+        put(&a, 1, Target::CompareSymbol(1), Zone::Compare);
+
+        click(&mut a, 3, 1);
+        assert_eq!(a.selected, second, "one click only selects");
+        assert!(a.compare_symbols().contains(&second));
+
+        click(&mut a, 3, 1);
+        assert!(
+            !a.compare_symbols().contains(&second),
+            "double click removes it from the comparison"
+        );
+    }
+
+    #[test]
+    fn the_wheel_over_the_comparison_changes_its_range() {
+        let mut a = app();
+        put(&a, 5, Target::CompareRange(0), Zone::Compare);
+        let start = Range::ALL
+            .iter()
+            .position(|r| *r == a.compare.range)
+            .unwrap();
+
+        wheel(&mut a, 3, 5, true);
+        assert_eq!(
+            a.compare.range,
+            Range::ALL[(start + 1).min(Range::ALL.len() - 1)]
+        );
+        wheel(&mut a, 3, 5, false);
+        assert_eq!(a.compare.range, Range::ALL[start]);
     }
 
     #[test]

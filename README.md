@@ -58,9 +58,18 @@ Press `?` in the app for the full list.
 ### Mouse
 
 Click a tab to switch screen, a row to select it, and double-click to open it in
-the chart. The wheel scrolls whatever list is under the pointer, and over the
-chart it changes timeframe. Chart range buttons, the style indicator and the
-indicator-pane title are all clickable.
+the chart. The wheel scrolls whatever list is under the pointer, and over either
+chart it changes timeframe. Everything the screens draw as a control is clickable:
+
+- **Chart** — range buttons, overlay toggles, the style indicator and the
+  indicator-pane title.
+- **Screener** — column headers sort (click the active one to reverse), the
+  panel title swaps in the valuation view, and the footer's `sort`, `watchlist`
+  and `equities` readouts are switches.
+- **Compare** — the range buttons, and the symbol chips: click one to select it,
+  click it again to drop it from the overlay.
+- **Dashboard, Company, Macro** — boards, the sector heatmap, tabs,
+  announcements, series and headlines.
 
 Mouse reporting takes over the terminal's own text selection, so `M` turns it
 off when you want to copy something out (holding Shift also works in most

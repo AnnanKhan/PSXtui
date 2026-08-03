@@ -389,6 +389,11 @@ fn draw_help(f: &mut Frame) {
         bind("double-click", "open a row in the chart"),
         bind("wheel", "scroll the list under the pointer"),
         bind("wheel on chart", "change timeframe"),
+        bind("panel title", "screener: price / valuation view"),
+        bind(
+            "footer switch",
+            "screener: sort order · watchlist · equities",
+        ),
         Line::raw(""),
         section("Global"),
         bind("1 – 6", "jump to screen"),
@@ -434,6 +439,7 @@ fn draw_help(f: &mut Frame) {
         bind("a", "add / remove the selected symbol"),
         bind("c", "reset the comparison set"),
         bind("[ / ]", "change range"),
+        bind("click", "a symbol to select it, again to remove it"),
         Line::raw(""),
         section("Macro"),
         bind("s", "move focus between series and headlines"),
@@ -654,6 +660,126 @@ mod tests {
                 "{label} drawn at column {col} is not clickable there"
             );
         }
+    }
+
+    /// A board of `n` synthetic quotes, enough for the screens to draw.
+    fn quotes(n: usize) -> Vec<crate::model::Quote> {
+        (0..n)
+            .map(|i| crate::model::Quote {
+                symbol: format!("S{i:02}"),
+                sector: "BANKS".into(),
+                indices: vec![],
+                ldcp: 10.0,
+                open: 10.0,
+                high: 10.0,
+                low: 10.0,
+                current: 10.0,
+                change: 0.0,
+                change_pct: i as f64,
+                volume: 100.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn screener_switches_are_clickable_where_they_are_drawn() {
+        let mut app = app();
+        app.on_event(DataEvent::Quotes(quotes(5)));
+        app.screener.equities_only = false;
+        app.screener.watchlist_only = true;
+        app.screen = Screen::Screener;
+
+        let buf = render(&app, 160, 20);
+        // The footer hangs off the bottom border of the screener panel, which
+        // is the last row the panel occupies — one above the status bar.
+        let y = buf.area.height - 2;
+        let text = row_text(&buf, y);
+
+        for (needle, want) in [
+            ("watchlist", hit::Toggle::Watchlist),
+            ("equities", hit::Toggle::Equities),
+        ] {
+            let byte = text
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from footer: {text:?}"));
+            let col = text[..byte].chars().count() as u16;
+            assert_eq!(
+                app.hits.borrow().target_at(col + 1, y),
+                Some(hit::Target::ScreenerToggle(want)),
+                "{needle} drawn at column {col} is not clickable there"
+            );
+        }
+
+        // The sort readout reverses the order, as clicking the active column
+        // header does.
+        let byte = text.find("sort ").expect("sort readout");
+        let col = text[..byte].chars().count() as u16 + "sort ".len() as u16;
+        assert_eq!(
+            app.hits.borrow().target_at(col, y),
+            Some(hit::Target::ScreenerToggle(hit::Toggle::SortDirection)),
+        );
+
+        // And the heading switches to the valuation view.
+        let top = (0..buf.area.height)
+            .find(|y| row_text(&buf, *y).contains("Screener  "))
+            .expect("heading should be drawn");
+        assert_eq!(
+            app.hits.borrow().target_at(3, top),
+            Some(hit::Target::ScreenerToggle(hit::Toggle::Valuation)),
+        );
+    }
+
+    #[test]
+    fn compare_ranges_and_symbols_are_clickable_where_they_are_drawn() {
+        let mut app = app();
+        app.on_event(DataEvent::Quotes(quotes(4)));
+        app.screener.equities_only = false;
+        app.selected = "S00".into();
+        app.screen = Screen::Compare;
+
+        let buf = render(&app, 160, 40);
+
+        let sym_y = (0..buf.area.height)
+            .find(|y| row_text(&buf, *y).contains(" Symbols "))
+            .expect("symbol row should be drawn");
+        let text = row_text(&buf, sym_y);
+        for (i, symbol) in app.compare_symbols().iter().enumerate() {
+            let byte = text
+                .find(symbol.as_str())
+                .unwrap_or_else(|| panic!("{symbol} missing: {text:?}"));
+            let col = text[..byte].chars().count() as u16;
+            assert_eq!(
+                app.hits.borrow().target_at(col, sym_y),
+                Some(hit::Target::CompareSymbol(i)),
+                "{symbol} drawn at column {col} is not clickable there"
+            );
+        }
+
+        let range_y = (0..buf.area.height)
+            .find(|y| row_text(&buf, *y).contains(" Range "))
+            .expect("range row should be drawn");
+        let text = row_text(&buf, range_y);
+        for (i, r) in crate::app::Range::ALL.iter().enumerate() {
+            let byte = text
+                .find(r.label())
+                .unwrap_or_else(|| panic!("{} missing: {text:?}", r.label()));
+            let col = text[..byte].chars().count() as u16;
+            assert_eq!(
+                app.hits.borrow().target_at(col, range_y),
+                Some(hit::Target::CompareRange(i)),
+                "range {} drawn at column {col} is not clickable there",
+                r.label()
+            );
+        }
+
+        // The wheel over the plot changes the range, so the plot is a zone.
+        let plot_y = (0..buf.area.height)
+            .find(|y| row_text(&buf, *y).contains("Rebased to 100"))
+            .expect("plot should be drawn");
+        assert_eq!(
+            app.hits.borrow().zone_at(4, plot_y + 2),
+            Some(hit::Zone::Compare),
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use ratatui::widgets::{Block, Paragraph};
 
+use super::hit::{Target, Zone};
 use super::{theme, widgets};
 use crate::analysis::stats::{self, TRADING_DAYS_PER_YEAR};
 use crate::app::{App, BENCHMARK, MAX_COMPARE, Range};
@@ -298,6 +299,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let [plot, bottom] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(bottom_h)]).areas(main);
 
+    // The wheel over the plot walks the range, as it does on the chart.
+    app.hits.borrow_mut().zone(plot, Zone::Compare);
     draw_overlay(f, plot, &view);
 
     if bottom_h > 0 {
@@ -323,10 +326,28 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
         return;
     }
 
+    // Chips are laid out by walking the spans, the same way the chart header
+    // places its buttons: the width of what was pushed is the width of what
+    // the terminal will show, so the two can't drift apart.
+    let mut x = inner.x + " Symbols ".len() as u16;
     let mut names = vec![Span::styled(" Symbols ", theme::label_style())];
-    for row in &view.rows {
+    for (i, row) in view.rows.iter().enumerate() {
+        let text = format!("{} ", row.symbol);
+        let w = text.chars().count() as u16;
+        if x < inner.right() {
+            app.hits.borrow_mut().target(
+                Rect {
+                    x,
+                    y: inner.y,
+                    width: w.min(inner.right() - x),
+                    height: 1,
+                },
+                Target::CompareSymbol(i),
+            );
+        }
+        x = x.saturating_add(w);
         names.push(Span::styled(
-            format!("{} ", row.symbol),
+            text,
             if row.cached {
                 Style::new().fg(row.color).bold()
             } else {
@@ -349,11 +370,27 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
         ));
     }
 
+    let range_y = inner.y + 1;
+    let mut x = inner.x + " Range ".len() as u16;
     let mut ranges = vec![Span::styled(" Range ", theme::label_style())];
-    for r in Range::ALL {
+    for (i, r) in Range::ALL.iter().enumerate() {
+        let text = format!("{} ", r.label());
+        let w = text.chars().count() as u16;
+        if range_y < inner.bottom() && x < inner.right() {
+            app.hits.borrow_mut().target(
+                Rect {
+                    x,
+                    y: range_y,
+                    width: w.min(inner.right() - x),
+                    height: 1,
+                },
+                Target::CompareRange(i),
+            );
+        }
+        x = x.saturating_add(w);
         ranges.push(Span::styled(
-            format!("{} ", r.label()),
-            if r == app.compare.range {
+            text,
+            if *r == app.compare.range {
                 Style::new().fg(theme::ACCENT).bold()
             } else {
                 Style::new().fg(theme::DIM)
@@ -361,7 +398,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
         ));
     }
     ranges.push(Span::styled(
-        "  [ ] range · a add/remove selected · c reset",
+        "  [ ] range · click a symbol to select, again to remove · c reset",
         theme::label_style(),
     ));
 

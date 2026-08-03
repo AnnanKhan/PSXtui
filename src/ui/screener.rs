@@ -15,7 +15,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
-use super::hit::{Target, Zone};
+use super::hit::{Target, Toggle, Zone};
 use crate::app::{App, SortKey, Valuation};
 use crate::model::Quote;
 
@@ -354,7 +354,17 @@ fn coverage(have: usize, shown: usize) -> String {
 ///
 /// Groups are appended only while they fit in `max` cells, so the readout never
 /// eats into the border on a narrow pane.
-fn footer(app: &App, coverage_of: Option<(usize, usize)>, max: usize) -> Line<'static> {
+///
+/// Returns the line together with where each switch ended up inside it, as
+/// (offset in cells from the start of the line, width, switch). Only the caller
+/// knows where a right-aligned title lands, so it does the final placement;
+/// building the offsets here keeps them tied to the spans they describe, which
+/// a dropped group would otherwise shift.
+fn footer(
+    app: &App,
+    coverage_of: Option<(usize, usize)>,
+    max: usize,
+) -> (Line<'static>, Vec<(u16, u16, Toggle)>) {
     let flag = |on: bool| {
         if on {
             Style::new().fg(theme::WARN).bold()
@@ -363,8 +373,10 @@ fn footer(app: &App, coverage_of: Option<(usize, usize)>, max: usize) -> Line<'s
         }
     };
 
-    // (text, style) groups in descending order of importance.
-    let mut groups: Vec<Vec<(String, Style)>> = Vec::new();
+    // (text, style, switch) groups in descending order of importance. A span
+    // carrying a switch is the part of the group a click acts on; the
+    // separators around it carry none.
+    let mut groups: Vec<Vec<(String, Style, Option<Toggle>)>> = Vec::new();
 
     // Coverage leads, ahead of even the sort readout: on a pane too narrow for
     // everything, the caveat is the last thing that should be dropped.
@@ -376,11 +388,12 @@ fn footer(app: &App, coverage_of: Option<(usize, usize)>, max: usize) -> Line<'s
             } else {
                 Style::new().fg(theme::ACCENT)
             },
+            None,
         )]);
     }
 
     groups.push(vec![
-        (" sort ".into(), theme::label_style()),
+        (" sort ".into(), theme::label_style(), None),
         (
             format!(
                 "{} {}",
@@ -392,44 +405,59 @@ fn footer(app: &App, coverage_of: Option<(usize, usize)>, max: usize) -> Line<'s
                 }
             ),
             Style::new().fg(theme::ACCENT),
+            Some(Toggle::SortDirection),
         ),
     ]);
 
     if let Some(q) = app.search.as_ref().filter(|q| !q.is_empty()) {
         groups.push(vec![
-            (" · ".into(), theme::border_style()),
+            (" · ".into(), theme::border_style(), None),
             (
                 format!("/{}", theme::truncate(q, 16)),
                 Style::new().fg(theme::ACCENT),
+                None,
             ),
         ]);
     }
     if app.screener.watchlist_only {
         groups.push(vec![
-            (" · ".into(), theme::border_style()),
-            ("watchlist".into(), flag(true)),
+            (" · ".into(), theme::border_style(), None),
+            ("watchlist".into(), flag(true), Some(Toggle::Watchlist)),
         ]);
     }
     groups.push(vec![
-        (" · ".into(), theme::border_style()),
-        ("equities".into(), flag(app.screener.equities_only)),
+        (" · ".into(), theme::border_style(), None),
+        (
+            "equities".into(),
+            flag(app.screener.equities_only),
+            Some(Toggle::Equities),
+        ),
     ]);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut switches: Vec<(u16, u16, Toggle)> = Vec::new();
     let mut used = 1usize; // the trailing pad
+    let mut offset = 0usize; // cells consumed by the spans pushed so far
     for group in groups {
-        let need: usize = group.iter().map(|(t, _)| t.chars().count()).sum();
+        let need: usize = group.iter().map(|(t, _, _)| t.chars().count()).sum();
         if used + need > max {
             break;
         }
         used += need;
-        spans.extend(group.into_iter().map(|(t, s)| Span::styled(t, s)));
+        for (text, style, toggle) in group {
+            let w = text.chars().count();
+            if let Some(toggle) = toggle {
+                switches.push((offset as u16, w as u16, toggle));
+            }
+            offset += w;
+            spans.push(Span::styled(text, style));
+        }
     }
     if spans.is_empty() {
-        return Line::default();
+        return (Line::default(), Vec::new());
     }
     spans.push(Span::raw(" "));
-    Line::from(spans)
+    (Line::from(spans), switches)
 }
 
 // --- entry point ---------------------------------------------------------
@@ -457,11 +485,48 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let heading = title(rows.len(), app.quotes.len(), valuation);
     // Only the valuation view makes a claim it has to qualify.
     let coverage_of = valuation.then(|| app.fundamentals_coverage(&rows));
-    let block = widgets::panel(&heading).title_bottom(
-        footer(app, coverage_of, area.width.saturating_sub(2) as usize).right_aligned(),
-    );
+    let (footer_line, switches) = footer(app, coverage_of, area.width.saturating_sub(2) as usize);
+    let footer_width = footer_line.width() as u16;
+    let block = widgets::panel(&heading).title_bottom(footer_line.right_aligned());
     let inner = block.inner(area);
     f.render_widget(block, area);
+
+    // The heading doubles as the price/valuation switch, like the `f` key.
+    if area.width > 2 && area.height > 0 {
+        let w = heading.chars().count() as u16;
+        app.hits.borrow_mut().target(
+            Rect {
+                x: area.x + 1,
+                y: area.y,
+                width: w.min(area.width - 2),
+                height: 1,
+            },
+            Target::ScreenerToggle(Toggle::Valuation),
+        );
+    }
+
+    // The footer sits on the bottom border, right-aligned and ending one cell
+    // short of the corner. Offsets were measured from the start of the line, so
+    // they only need the line's own origin added.
+    if area.height > 1 && footer_width > 0 {
+        let start = area.right().saturating_sub(1 + footer_width);
+        let y = area.bottom() - 1;
+        let mut hits = app.hits.borrow_mut();
+        for (offset, width, toggle) in switches {
+            let x = start.saturating_add(offset);
+            if x < area.right() {
+                hits.target(
+                    Rect {
+                        x,
+                        y,
+                        width: width.min(area.right() - x),
+                        height: 1,
+                    },
+                    Target::ScreenerToggle(toggle),
+                );
+            }
+        }
+    }
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -801,6 +866,7 @@ mod tests {
 
     fn footer_text(app: &App, max: usize) -> String {
         footer(app, None, max)
+            .0
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -948,6 +1014,7 @@ mod tests {
 
     fn footer_text_with(app: &App, coverage_of: Option<(usize, usize)>, max: usize) -> String {
         footer(app, coverage_of, max)
+            .0
             .spans
             .iter()
             .map(|s| s.content.as_ref())

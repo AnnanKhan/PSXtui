@@ -20,6 +20,14 @@ pub const WARN: Color = Color::Rgb(210, 153, 34);
 pub const SELECT_BG: Color = Color::Rgb(33, 38, 45);
 pub const VOLUME: Color = Color::Rgb(88, 110, 150);
 
+/// Extra hues, used where several series share one set of axes and the only
+/// thing telling them apart is colour. Chosen to stay separable on a dark
+/// background *and* from the four above, which come first.
+pub const VIOLET: Color = Color::Rgb(188, 140, 255);
+pub const CYAN: Color = Color::Rgb(57, 197, 207);
+pub const PINK: Color = Color::Rgb(247, 120, 186);
+pub const SAND: Color = Color::Rgb(219, 171, 121);
+
 /// Colour for a signed change: green up, red down, grey unchanged.
 pub fn change_color(v: f64) -> Color {
     if v > 0.0 {

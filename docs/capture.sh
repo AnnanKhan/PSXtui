@@ -45,7 +45,16 @@ grab chart 3
 grab analysis 4
 grab company 5
 grab intraday 6
-grab compare 7
+# The comparison is shown with a grown set rather than the four it seeds
+# itself with, to show what eight series look like on one pair of axes.
+tmux send-keys -t $SESSION 7; sleep 2
+for q in mari psx sys atrl; do
+    tmux send-keys -t $SESSION a; sleep 1.2
+    tmux send-keys -t $SESSION "$q"; sleep 1.5
+    tmux send-keys -t $SESSION Enter; sleep 1.2
+    tmux send-keys -t $SESSION Escape; sleep 1
+done
+grab compare-full
 grab compare-picker a
 tmux send-keys -t $SESSION Escape; sleep 1
 grab seasonality 8

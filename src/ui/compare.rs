@@ -1,4 +1,4 @@
-//! Side-by-side comparison of two to four symbols.
+//! Side-by-side comparison of two to eight symbols.
 //!
 //! The screen answers one question — *which of these did better, and at what
 //! risk* — so everything on it is derived from a single aligned window.
@@ -42,12 +42,26 @@ const REMOVE_W: u16 = 2;
 const ADD_CHIP: &str = "+ Add ";
 const ADD_W: u16 = 6;
 
+/// The gutter the chip rows are indented past, so a wrapped line lines up under
+/// the first chip rather than under the label.
+const CHIP_LABEL: &str = " Symbols ";
+
 /// Distinct hues for the overlay, one per compared symbol.
 ///
-/// Four is the cap, which is about as many series as one set of axes can carry
-/// before the eye stops separating them.
+/// Ordered so a two- or three-way comparison — much the commonest case — gets
+/// the four most separable colours first, and the subtler hues are only reached
+/// by a set large enough to need them.
 pub fn series_color(i: usize) -> Color {
-    const PALETTE: [Color; MAX_COMPARE] = [theme::ACCENT, theme::WARN, theme::UP, theme::DOWN];
+    const PALETTE: [Color; MAX_COMPARE] = [
+        theme::ACCENT,
+        theme::WARN,
+        theme::UP,
+        theme::DOWN,
+        theme::VIOLET,
+        theme::CYAN,
+        theme::PINK,
+        theme::SAND,
+    ];
     PALETTE[i % PALETTE.len()]
 }
 
@@ -277,6 +291,70 @@ fn beta_vs_benchmark(bars: &[Bar], bench: &[Bar], range: Range) -> f64 {
     stats::beta(&a, &b)
 }
 
+// --- header layout --------------------------------------------------------
+
+/// One thing the chip row draws: a compared symbol, or the trailing `+ Add`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chip {
+    Symbol(usize),
+    Add,
+}
+
+/// Where the header's chips land, worked out once and used both to size the
+/// panel and to draw it.
+///
+/// Eight chips no longer fit beside a label and a run of metadata on an
+/// 80-column terminal, so they wrap — and because the hit rects are built from
+/// this same packing, a chip on the second line is as clickable as one on the
+/// first.
+#[derive(Debug, Default)]
+struct HeaderPlan {
+    lines: Vec<Vec<Chip>>,
+    /// True when the trailing metadata had to go on a line of its own.
+    meta_own_line: bool,
+}
+
+impl HeaderPlan {
+    /// Panel height: two borders, the chip lines, any metadata line, and the
+    /// range row.
+    fn height(&self) -> u16 {
+        3 + self.lines.len() as u16 + u16::from(self.meta_own_line)
+    }
+}
+
+fn chip_width(view: &View, chip: Chip) -> u16 {
+    match chip {
+        // symbol + a space, then the ✕ affordance.
+        Chip::Symbol(i) => view.rows[i].symbol.chars().count() as u16 + 1 + REMOVE_W,
+        Chip::Add => ADD_W,
+    }
+}
+
+fn plan_header(view: &View, meta_width: u16, width: u16) -> HeaderPlan {
+    let indent = CHIP_LABEL.chars().count() as u16;
+    let mut plan = HeaderPlan::default();
+    let mut line: Vec<Chip> = Vec::new();
+    let mut x = indent;
+
+    let chips = (0..view.rows.len())
+        .map(Chip::Symbol)
+        .chain(std::iter::once(Chip::Add));
+    for chip in chips {
+        let w = chip_width(view, chip);
+        // Never wrap an empty line: a chip wider than the panel is clipped
+        // rather than pushed onto a line it also cannot fit on.
+        if !line.is_empty() && x + w > width {
+            plan.lines.push(std::mem::take(&mut line));
+            x = indent;
+        }
+        x += w;
+        line.push(chip);
+    }
+    plan.lines.push(line);
+    plan.meta_own_line = x + meta_width > width;
+    plan
+}
+
 // --- rendering ------------------------------------------------------------
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
@@ -286,11 +364,18 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     let view = build(app);
 
-    let header_h = if area.height >= 8 { 4 } else { 0 };
+    // The header is sized to what it has to say: a wide terminal keeps one
+    // chip line, a narrow one with eight symbols grows instead of hiding them.
+    let plan = plan_header(&view, meta_width(&view), area.width.saturating_sub(2));
+    let header_h = if area.height >= plan.height() + 4 {
+        plan.height()
+    } else {
+        0
+    };
     let [header, main] =
         Layout::vertical([Constraint::Length(header_h), Constraint::Min(0)]).areas(area);
     if header_h > 0 {
-        draw_header(f, header, app, &view);
+        draw_header(f, header, app, &view, &plan);
     }
     if main.height == 0 {
         return;
@@ -451,7 +536,32 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, view: &View) {
     );
 }
 
-fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
+/// The trailing readouts on the chip row: what they cost in cells.
+fn meta_width(view: &View) -> u16 {
+    meta_spans(view)
+        .iter()
+        .map(|s| s.content.chars().count() as u16)
+        .sum()
+}
+
+fn meta_spans(view: &View) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled(
+            format!("· {} aligned sessions ", view.sessions),
+            theme::label_style(),
+        ),
+        Span::styled(format!("· β vs {BENCHMARK} "), theme::label_style()),
+    ];
+    if view.rows.iter().any(|r| !r.cached) {
+        spans.push(Span::styled(
+            "· missing history ",
+            Style::new().fg(theme::WARN),
+        ));
+    }
+    spans
+}
+
+fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View, plan: &HeaderPlan) {
     let block = widgets::panel("Compare");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -466,14 +576,12 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
     // Each chip is two targets, not one: the name selects, and the ✕ beside it
     // removes. Removal used to be a double-click on the name — a gesture with
     // nothing on screen to advertise it, and one that fires a selection first.
-    let mut x = inner.x + " Symbols ".len() as u16;
-    let mut names = vec![Span::styled(" Symbols ", theme::label_style())];
-    let mark = |app: &App, x: u16, w: u16, target: Target| {
-        if x < inner.right() {
+    let mark = |app: &App, x: u16, y: u16, w: u16, target: Target| {
+        if x < inner.right() && y < inner.bottom() {
             app.hits.borrow_mut().target(
                 Rect {
                     x,
-                    y: inner.y,
+                    y,
                     width: w.min(inner.right() - x),
                     height: 1,
                 },
@@ -482,56 +590,77 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
         }
     };
 
-    for (i, row) in view.rows.iter().enumerate() {
-        let text = format!("{} ", row.symbol);
-        let w = text.chars().count() as u16;
-        mark(app, x, w, Target::CompareSymbol(i));
-        x = x.saturating_add(w);
-        names.push(Span::styled(
-            text,
-            if row.cached {
-                Style::new().fg(row.color).bold()
-            } else {
-                Style::new().fg(theme::DIM)
-            },
-        ));
-
-        mark(app, x, REMOVE_W, Target::CompareRemove(i));
-        x = x.saturating_add(REMOVE_W);
-        names.push(Span::styled(REMOVE_CHIP, Style::new().fg(theme::DIM)));
-    }
-
-    // The one affordance that says the set can grow. Drawn dim once full, so
-    // the cap explains itself rather than the chip simply vanishing.
+    let indent = CHIP_LABEL.chars().count() as u16;
     let room = view.rows.len() < MAX_COMPARE;
-    if room {
-        mark(app, x, ADD_W, Target::CompareAdd);
-    }
-    names.push(Span::styled(
-        ADD_CHIP,
-        if room {
-            Style::new().fg(theme::ACCENT).bold()
-        } else {
-            Style::new().fg(theme::DIM)
-        },
-    ));
+    let mut chip_lines: Vec<Line> = Vec::new();
 
-    names.push(Span::styled(
-        format!("· {} aligned sessions ", view.sessions),
-        theme::label_style(),
-    ));
-    names.push(Span::styled(
-        format!("· β vs {BENCHMARK} "),
-        theme::label_style(),
-    ));
-    if view.rows.iter().any(|r| !r.cached) {
-        names.push(Span::styled(
-            "· missing history ",
-            Style::new().fg(theme::WARN),
-        ));
+    for (row, chips) in plan.lines.iter().enumerate() {
+        let y = inner.y + row as u16;
+        let mut x = inner.x + indent;
+        // The label sits on the first line only; the rest align under it.
+        let mut spans = vec![Span::styled(
+            if row == 0 {
+                CHIP_LABEL.to_string()
+            } else {
+                " ".repeat(indent as usize)
+            },
+            theme::label_style(),
+        )];
+
+        for chip in chips {
+            match *chip {
+                Chip::Symbol(i) => {
+                    let r = &view.rows[i];
+                    let text = format!("{} ", r.symbol);
+                    let w = text.chars().count() as u16;
+                    mark(app, x, y, w, Target::CompareSymbol(i));
+                    x = x.saturating_add(w);
+                    spans.push(Span::styled(
+                        text,
+                        if r.cached {
+                            Style::new().fg(r.color).bold()
+                        } else {
+                            Style::new().fg(theme::DIM)
+                        },
+                    ));
+
+                    mark(app, x, y, REMOVE_W, Target::CompareRemove(i));
+                    x = x.saturating_add(REMOVE_W);
+                    spans.push(Span::styled(REMOVE_CHIP, Style::new().fg(theme::DIM)));
+                }
+                // The one affordance that says the set can grow. Drawn dim
+                // once full, so the cap explains itself rather than the chip
+                // simply vanishing.
+                Chip::Add => {
+                    if room {
+                        mark(app, x, y, ADD_W, Target::CompareAdd);
+                    }
+                    x = x.saturating_add(ADD_W);
+                    spans.push(Span::styled(
+                        ADD_CHIP,
+                        if room {
+                            Style::new().fg(theme::ACCENT).bold()
+                        } else {
+                            Style::new().fg(theme::DIM)
+                        },
+                    ));
+                }
+            }
+        }
+        chip_lines.push(Line::from(spans));
     }
 
-    let range_y = inner.y + 1;
+    // The readouts follow the last chip, or take the next line when they no
+    // longer fit beside it.
+    if plan.meta_own_line {
+        let mut spans = vec![Span::raw(" ".repeat(indent as usize))];
+        spans.extend(meta_spans(view));
+        chip_lines.push(Line::from(spans));
+    } else if let Some(last) = chip_lines.last_mut() {
+        last.spans.extend(meta_spans(view));
+    }
+
+    let range_y = inner.y + chip_lines.len() as u16;
     let mut x = inner.x + " Range ".len() as u16;
     let mut ranges = vec![Span::styled(" Range ", theme::label_style())];
     for (i, r) in Range::ALL.iter().enumerate() {
@@ -563,10 +692,8 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
         theme::label_style(),
     ));
 
-    f.render_widget(
-        Paragraph::new(Text::from(vec![Line::from(names), Line::from(ranges)])),
-        inner,
-    );
+    chip_lines.push(Line::from(ranges));
+    f.render_widget(Paragraph::new(Text::from(chip_lines)), inner);
 }
 
 fn draw_overlay(f: &mut Frame, area: Rect, view: &View) {
@@ -595,7 +722,14 @@ fn draw_overlay(f: &mut Frame, area: Rect, view: &View) {
         return;
     }
 
-    let legend_h = u16::from(inner.height >= 4);
+    // Eight entries no longer fit on one line at any ordinary width, so the
+    // legend takes the rows it needs — but never so many that it starves the
+    // plot it is labelling.
+    let legend_h = if inner.height >= 4 {
+        legend_rows(view, inner.width).min(inner.height.saturating_sub(3).max(1))
+    } else {
+        0
+    };
     let [plot, legend] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(legend_h)]).areas(inner);
 
@@ -636,24 +770,73 @@ fn draw_overlay(f: &mut Frame, area: Rect, view: &View) {
     f.render_widget(canvas, plot);
 
     if legend_h > 0 {
-        let mut spans = Vec::new();
+        // Entries are laid out by hand rather than word-wrapped, so a symbol
+        // never ends up on a different line from its own return.
+        let mut lines: Vec<Line> = Vec::new();
+        let mut spans: Vec<Span> = Vec::new();
+        let mut x = 0u16;
         for (symbol, color, values) in &view.curves {
             let last = values.last().copied().unwrap_or(100.0);
+            let change = format!(" {} ", theme::pct(last - 100.0));
+            let w = 4 + symbol.chars().count() as u16 + change.chars().count() as u16;
+            if !spans.is_empty() && x + w > inner.width {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                x = 0;
+            }
+            x += w;
             spans.push(Span::styled(" ── ", Style::new().fg(*color)));
             spans.push(Span::styled(symbol.clone(), Style::new().fg(*color).bold()));
             spans.push(Span::styled(
-                format!(" {} ", theme::pct(last - 100.0)),
+                change,
                 Style::new().fg(theme::change_color(last - 100.0)),
             ));
         }
+        // The window the whole legend describes, once, at the end. The leading
+        // separator is only a separator when something precedes it on the line.
         if let (Some(first), Some(last)) = (view.days.first(), view.days.last()) {
-            spans.push(Span::styled(
-                format!("│ {first} → {last}"),
-                theme::label_style(),
-            ));
+            let text = format!("│ {first} → {last}");
+            if !spans.is_empty() && x + text.chars().count() as u16 > inner.width {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+            }
+            let text = if spans.is_empty() {
+                format!(" {first} → {last}")
+            } else {
+                text
+            };
+            spans.push(Span::styled(text, theme::label_style()));
         }
-        f.render_widget(Paragraph::new(Line::from(spans)), legend);
+        lines.push(Line::from(spans));
+        lines.truncate(legend_h as usize);
+        f.render_widget(Paragraph::new(Text::from(lines)), legend);
     }
+}
+
+/// Lines the legend needs at `width` — one entry per series, packed.
+fn legend_rows(view: &View, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let mut rows = 1u16;
+    let mut x = 0u16;
+    let entries = view
+        .curves
+        .iter()
+        .map(|(symbol, _, values)| {
+            let last = values.last().copied().unwrap_or(100.0);
+            4 + symbol.chars().count() as u16 + theme::pct(last - 100.0).chars().count() as u16 + 2
+        })
+        .chain(view.days.first().zip(view.days.last()).map(|(a, b)| {
+            // "│ 2025-01-01 → 2025-12-31"
+            a.chars().count() as u16 + b.chars().count() as u16 + 5
+        }));
+    for w in entries {
+        if x > 0 && x + w > width {
+            rows += 1;
+            x = 0;
+        }
+        x += w;
+    }
+    rows
 }
 
 /// Y-bounds covering every drawn curve, padded so nothing hugs the frame.
@@ -1043,13 +1226,130 @@ mod tests {
         none.compare.curated = true;
         none.compare.symbols.clear();
 
+        // A full house: the chip row wraps, the legend wraps, and the table
+        // grows — all of which have to survive a narrow terminal.
+        let crowd = full_house();
+
         for app in [
-            &full, &missing, &single, &flat, &empty, &picking, &no_match, &none,
+            &full, &missing, &single, &flat, &empty, &picking, &no_match, &none, &crowd,
         ] {
             for (w, h) in [(20u16, 10u16), (1, 1), (40, 12), (80, 24), (200, 60)] {
                 render(app, w, h);
             }
         }
+    }
+
+    /// A comparison holding the maximum number of symbols.
+    fn full_house() -> App {
+        let names = ["HBL", "OGDC", "PPL", "LUCK", "ENGRO", "MARI", "FFC", "MCB"];
+        let entries: Vec<(&str, Vec<Bar>)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (*s, series(300, 50.0 + i as f64 * 30.0, 0.0004 * i as f64)))
+            .collect();
+        let mut app = app_with(&entries);
+        app.compare.symbols = names.iter().map(|s| (*s).to_string()).collect();
+        app.compare.curated = true;
+        app
+    }
+
+    // -- the header's chip row ---------------------------------------------
+
+    #[test]
+    fn every_compared_symbol_gets_its_own_colour() {
+        let seen: std::collections::HashSet<String> = (0..MAX_COMPARE)
+            .map(|i| format!("{:?}", series_color(i)))
+            .collect();
+        assert_eq!(
+            seen.len(),
+            MAX_COMPARE,
+            "two series sharing a hue cannot be told apart on one set of axes"
+        );
+    }
+
+    #[test]
+    fn the_chip_row_wraps_instead_of_running_off_the_panel() {
+        let app = full_house();
+        let view = build(&app);
+        let meta = meta_width(&view);
+
+        // Wide enough for everything: one line, metadata beside the chips.
+        let wide = plan_header(&view, meta, 200);
+        assert_eq!(wide.lines.len(), 1);
+        assert!(!wide.meta_own_line);
+        assert_eq!(wide.height(), 4, "the usual four-row header");
+
+        // Eight chips do not fit beside the readouts on an 80-column
+        // terminal, and past that the chips themselves have to wrap.
+        assert!(plan_header(&view, meta, 78).meta_own_line);
+        let narrow = plan_header(&view, meta, 50);
+        assert!(narrow.lines.len() > 1, "chips must wrap, not vanish");
+        assert!(narrow.height() > 4, "and the panel must grow to hold them");
+
+        // Every chip is placed exactly once, in order, and no line overflows.
+        let indent = CHIP_LABEL.chars().count() as u16;
+        let mut seen = Vec::new();
+        for line in &narrow.lines {
+            let width: u16 = line.iter().map(|c| chip_width(&view, *c)).sum();
+            assert!(
+                indent + width <= 50 || line.len() == 1,
+                "a packed line overflowed the panel"
+            );
+            seen.extend(line.iter().copied());
+        }
+        let expected: Vec<Chip> = (0..MAX_COMPARE)
+            .map(Chip::Symbol)
+            .chain([Chip::Add])
+            .collect();
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn a_wrapped_chip_is_clickable_where_it_is_drawn() {
+        // The whole point of packing once and drawing from the same plan: the
+        // eighth chip on the second line still hits its own target.
+        let app = full_house();
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, f.area(), &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let last = app.compare_symbols().len() - 1;
+        let symbol = app.compare_symbols()[last].clone();
+        let (x, y) = find_text(&buf, &symbol).expect("the last chip must be drawn");
+        assert_eq!(
+            app.hits.borrow().target_at(x, y),
+            Some(Target::CompareSymbol(last))
+        );
+        // Its ✕ sits immediately after it and removes that same chip.
+        let cross = x + symbol.chars().count() as u16 + 1;
+        assert_eq!(
+            app.hits.borrow().target_at(cross, y),
+            Some(Target::CompareRemove(last))
+        );
+    }
+
+    /// First cell of `needle` in the buffer, scanning top to bottom.
+    fn find_text(buf: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if let Some(byte) = row.find(needle) {
+                return Some((row[..byte].chars().count() as u16, y));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn the_legend_takes_the_rows_it_needs_without_starving_the_plot() {
+        let app = full_house();
+        let view = build(&app);
+
+        assert_eq!(legend_rows(&view, 240), 1, "it all fits on a wide terminal");
+        assert!(legend_rows(&view, 60) > 1, "eight entries cannot fit in 60");
+        assert_eq!(legend_rows(&view, 0), 1, "a zero width still costs a row");
     }
 
     #[test]

@@ -16,7 +16,7 @@ return analytics, company fundamentals, and intraday microstructure.
 | 4 | **Analysis** | Returns by window, annualized return & volatility, Sharpe, Sortino, max drawdown, beta and correlation vs KSE100 |
 | 5 | **Company** | Business profile, key people, equity structure, annual & quarterly financials, ratios, announcements |
 | 6 | **Intraday** | Session price with VWAP, 15-minute volume distribution, live trade tape |
-| 7 | **Compare** | 2-4 scrips side by side — rebased performance overlay, risk table, correlation matrix |
+| 7 | **Compare** | 2-8 scrips side by side — rebased performance overlay, risk table, correlation matrix |
 | 8 | **Seasonality** | Month-by-year return grid, day-of-week effects, return distribution, streaks |
 | 9 | **Macro** | 20 external series — energy, metals, agriculture, freight, FX, crypto — plus the SBP policy rate and business news, with correlation to the selected scrip |
 
@@ -24,7 +24,7 @@ Timeframes: 5D, 1M, 3M, 6M, YTD, 1Y, 2Y, 3Y, 5Y and MAX.
 
 <table>
 <tr><td width="50%"><a href="docs/chart.png"><img src="docs/chart.png" alt="Chart"></a><br><b>Chart</b> — candles, SMA/EMA overlays, volume pane</td>
-<td width="50%"><a href="docs/compare.png"><img src="docs/compare.png" alt="Compare"></a><br><b>Compare</b> — rebased overlay, risk table, correlations</td></tr>
+<td width="50%"><a href="docs/compare-full.png"><img src="docs/compare-full.png" alt="Compare"></a><br><b>Compare</b> — up to eight scrips rebased, with risk and correlations</td></tr>
 <tr><td><a href="docs/screener.png"><img src="docs/screener.png" alt="Screener"></a><br><b>Screener</b> — every listed scrip, sortable</td>
 <td><a href="docs/macro.png"><img src="docs/macro.png" alt="Macro"></a><br><b>Macro</b> — commodities, FX, policy rate, headlines</td></tr>
 </table>
@@ -172,9 +172,15 @@ through the screener to pick up a symbol first.
   from the keyboard, and `c` resets the set back to the watchlist seed.
 - **A symbol with no local history is fetched** when you add it, so it fills in
   rather than sitting in the table as an empty row.
+- **The screen seeds itself with four** — the selection, then the watchlist,
+  then the day's most-traded names — and leaves room to grow to eight. `c` puts
+  it back to that seed.
 
-Up to four symbols overlay at once — as many distinct colours as one set of axes
-carries before the eye stops separating them.
+Up to eight symbols overlay at once — where the palette runs out of hues that
+stay separable on a dark background. The chip row wraps and the legend packs
+onto extra lines rather than hiding anything, so a full set is still readable on
+an 80-column terminal; the correlation matrix folds away when the pane is too
+narrow to hold it honestly.
 
 ## How it gets data
 

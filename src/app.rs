@@ -638,9 +638,15 @@ impl ChartStyle {
 
 /// The most symbols the Compare screen will overlay at once.
 ///
-/// Four distinguishable colours is about as much as one set of axes carries
-/// before the overlay stops being readable.
-pub const MAX_COMPARE: usize = 4;
+/// Eight is where the palette runs out of hues that stay separable on a dark
+/// background; past that the overlay is a colour-matching puzzle rather than a
+/// comparison. The table and the correlation matrix carry the detail for a set
+/// that large, and both fold away on a terminal too small to hold them.
+pub const MAX_COMPARE: usize = 8;
+
+/// How many symbols the Compare screen seeds itself with before the user has
+/// chosen a set. Well below [`MAX_COMPARE`], so there is always room to add.
+pub const DEFAULT_COMPARE: usize = 4;
 
 /// Picker rows assumed before the first frame publishes the real count.
 const DEFAULT_PICKER_ROWS: usize = 10;
@@ -2265,17 +2271,27 @@ impl App {
     /// symbol first, then the watchlist. With neither — a fresh install — it
     /// falls back to the day's most-traded names, so the screen has something
     /// meaningful on it the first time it is opened.
+    ///
+    /// The seed stops at [`DEFAULT_COMPARE`] rather than at the cap: a screen
+    /// that opens already full has nowhere to put the symbol you came to add,
+    /// and four curves is what the overlay reads best at anyway.
     pub fn compare_symbols(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
+        // A non-empty set speaks for itself; `curated` is what distinguishes a
+        // set the user emptied from one they have not chosen yet.
+        let curated = self.compare.curated || !self.compare.symbols.is_empty();
+        let limit = if curated {
+            MAX_COMPARE
+        } else {
+            DEFAULT_COMPARE
+        };
         let push = |out: &mut Vec<String>, s: &str| {
-            if !s.is_empty() && out.len() < MAX_COMPARE && !out.iter().any(|x| x == s) {
+            if !s.is_empty() && out.len() < limit && !out.iter().any(|x| x == s) {
                 out.push(s.to_string());
             }
         };
 
-        // A non-empty set speaks for itself; `curated` is what distinguishes a
-        // set the user emptied from one they have not chosen yet.
-        if self.compare.curated || !self.compare.symbols.is_empty() {
+        if curated {
             for s in &self.compare.symbols {
                 push(&mut out, s);
             }
@@ -3805,6 +3821,28 @@ mod tests {
         b.on_key(key('/'));
         assert_eq!(b.screen, Screen::Screener);
         assert!(b.search.is_some());
+    }
+
+    #[test]
+    fn the_seed_leaves_room_to_add_but_a_curated_set_may_fill_the_cap() {
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(
+            (0..12)
+                .map(|i| quote(&format!("S{i:02}"), 10.0, 1.0, 100.0 * (12 - i) as f64))
+                .collect(),
+        ));
+        assert_eq!(
+            a.compare_symbols().len(),
+            DEFAULT_COMPARE,
+            "a screen that opens already full has nowhere to put a new symbol"
+        );
+
+        // Adding grows past the seed, up to the real cap.
+        for i in 0..12 {
+            let sym = format!("S{i:02}");
+            a.compare_toggle(&sym);
+        }
+        assert_eq!(a.compare_symbols().len(), MAX_COMPARE);
     }
 
     #[test]

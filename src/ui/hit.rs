@@ -53,6 +53,12 @@ pub enum Target {
     CompareRange(usize),
     /// A symbol chip in the comparison header, by index into the compared set.
     CompareSymbol(usize),
+    /// The `✕` on a comparison chip: one click drops that symbol.
+    CompareRemove(usize),
+    /// The comparison header's `+ Add` chip, which opens the symbol picker.
+    CompareAdd,
+    /// A row of the comparison's symbol picker, by index into its matches.
+    ComparePick(usize),
     /// One of the screener's filter or sort affordances.
     ScreenerToggle(Toggle),
 }
@@ -85,6 +91,8 @@ pub enum Zone {
     Chart,
     /// The comparison plot, where the wheel changes the range as on the chart.
     Compare,
+    /// The comparison's symbol picker, where the wheel walks the matches.
+    ComparePicker,
 }
 
 /// What the renderer drew, and where.

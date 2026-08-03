@@ -642,24 +642,52 @@ impl ChartStyle {
 /// before the overlay stops being readable.
 pub const MAX_COMPARE: usize = 4;
 
+/// Picker rows assumed before the first frame publishes the real count.
+const DEFAULT_PICKER_ROWS: usize = 10;
+
+/// The most matches the picker will rank, so typing a single letter can't cost
+/// a sort of the whole market on every keystroke.
+const MAX_PICKER_MATCHES: usize = 200;
+
 /// The Compare screen's symbol set and window.
 ///
-/// `symbols` empty means "not chosen yet" — the screen then seeds itself from
-/// the watchlist (see [`App::compare_symbols`]) so it is useful before the user
-/// touches it.
+/// Until the user edits the set the screen seeds itself from the watchlist (see
+/// [`App::compare_symbols`]) so it is useful before it is touched. `curated`
+/// records that first edit, which is what lets an emptied comparison stay
+/// empty: without it, removing the last chip would silently bring the seed
+/// back and the removal would look like it had failed.
 #[derive(Debug)]
 pub struct CompareState {
     pub symbols: Vec<String>,
+    pub curated: bool,
     pub range: Range,
+    /// `Some` while the add-symbol picker is open.
+    pub picker: Option<PickerState>,
 }
 
 impl Default for CompareState {
     fn default() -> Self {
         Self {
             symbols: Vec::new(),
+            curated: false,
             range: Range::Y1,
+            picker: None,
         }
     }
+}
+
+/// The Compare screen's symbol picker.
+///
+/// Adding used to mean leaving the screen, selecting a scrip elsewhere and
+/// coming back to press `a`. The picker keeps that whole loop on one screen:
+/// type to narrow the market, Enter to toggle a name in or out of the overlay.
+#[derive(Debug, Default)]
+pub struct PickerState {
+    pub query: String,
+    /// Row under the keyboard cursor, as an index into the current matches.
+    pub cursor: usize,
+    /// First row drawn, so a long match list can scroll.
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -712,6 +740,9 @@ pub struct App {
     pub dashboard: DashboardState,
     /// Published by the dashboard renderer each frame; read by key handling.
     pub dash_layout: Cell<DashLayout>,
+    /// Rows the comparison picker drew last frame, so paging and the scroll
+    /// window match what is actually on screen.
+    pub picker_rows: Cell<usize>,
     /// What the renderer drew and where, for mouse hit-testing.
     pub hits: RefCell<HitMap>,
     /// The last click, for detecting a double-click.
@@ -791,6 +822,7 @@ impl App {
             screener: ScreenerState::default(),
             dashboard: DashboardState::default(),
             dash_layout: Cell::new(DashLayout::default()),
+            picker_rows: Cell::new(DEFAULT_PICKER_ROWS),
             hits: RefCell::new(HitMap::default()),
             last_click: None,
             mouse_enabled: true,
@@ -1334,6 +1366,12 @@ impl App {
     // --- input -----------------------------------------------------------
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // The comparison picker is a prompt too, and takes precedence over the
+        // global bindings for the same reason the search prompt does.
+        if self.screen == Screen::Compare && self.on_picker_key(key) {
+            return;
+        }
+
         // The search prompt swallows most keys while it is open.
         if let Some(query) = self.search.as_mut() {
             match key.code {
@@ -1391,6 +1429,10 @@ impl App {
                 }
             }
 
+            // On Compare, `/` means "find me a symbol to compare" rather than
+            // "leave for the screener" — the destination is the screen you are
+            // already looking at.
+            KeyCode::Char('/') if self.screen == Screen::Compare => self.compare_picker_open(),
             KeyCode::Char('/') => {
                 self.search = Some(String::new());
                 self.screen = Screen::Screener;
@@ -1439,6 +1481,17 @@ impl App {
                 self.show_help = false;
             }
             return;
+        }
+
+        // The picker floats over the screen, so a click that misses it reads as
+        // "never mind" — the same way clicking off a menu closes it.
+        if self.compare.picker.is_some() && matches!(ev.kind, MouseEventKind::Down(_)) {
+            let outside =
+                self.hits.borrow().zone_at(ev.column, ev.row) != Some(Zone::ComparePicker);
+            if outside {
+                self.compare_picker_close();
+                return;
+            }
         }
 
         match ev.kind {
@@ -1576,6 +1629,12 @@ impl App {
                     self.compare.range = *r;
                 }
             }
+            // One click on the chip's ✕ drops it. Nothing else on the screen
+            // removes a symbol in a single, undoable-looking gesture.
+            Target::CompareRemove(i) => self.compare_remove_at(i),
+            Target::CompareAdd => self.compare_picker_open(),
+            Target::ComparePick(i) => self.compare_pick(i),
+
             // Click to inspect — the rest of the app follows the selection —
             // and click the same chip again to drop it from the overlay.
             Target::CompareSymbol(i) => {
@@ -1630,7 +1689,11 @@ impl App {
             Zone::Sectors => self.dashboard.focus = DashFocus::Sectors,
             Zone::MacroSeries => self.macro_focus = MacroFocus::Series,
             Zone::MacroNews => self.macro_focus = MacroFocus::News,
-            Zone::Screener | Zone::Announcements | Zone::Chart | Zone::Compare => {}
+            Zone::Screener
+            | Zone::Announcements
+            | Zone::Chart
+            | Zone::Compare
+            | Zone::ComparePicker => {}
         }
     }
 
@@ -1699,6 +1762,14 @@ impl App {
                 // Scrolling up zooms in, so it walks toward the shorter window.
                 let next = (i + delta.signum()).clamp(0, n - 1);
                 self.chart.range = Range::ALL[next as usize];
+            }
+            // Over the picker the wheel walks the match list, as over any list.
+            Zone::ComparePicker => {
+                let len = self.compare_picker_matches().len();
+                if let Some(picker) = self.compare.picker.as_mut() {
+                    picker.cursor = step(picker.cursor, delta, len);
+                }
+                self.clamp_picker();
             }
             // The comparison plot is a chart too, and its wheel reads the same.
             Zone::Compare => {
@@ -1983,7 +2054,7 @@ impl App {
 
     /// Add a symbol to the comparison, or drop it if it is already in.
     ///
-    /// Shared by the `a` key and by clicking a symbol chip in the header.
+    /// Shared by the `a` key, the picker and the header's chips.
     pub fn compare_toggle(&mut self, symbol: &str) {
         if symbol.is_empty() {
             return;
@@ -1999,6 +2070,13 @@ impl App {
             None if set.len() < MAX_COMPARE => {
                 set.push(symbol.to_string());
                 self.status = format!("{symbol} added to comparison");
+                self.compare.symbols = set;
+                self.compare.curated = true;
+                // A scrip that has never been visited has no cached history,
+                // so it would join the overlay as an empty row. Fetch it now:
+                // the worker writes through the cache the screen reads from.
+                self.warm_compare_history(symbol);
+                return;
             }
             None => {
                 self.status = format!("Comparison holds {MAX_COMPARE} symbols — remove one first");
@@ -2006,6 +2084,179 @@ impl App {
             }
         }
         self.compare.symbols = set;
+        self.compare.curated = true;
+    }
+
+    /// Drop the chip at `i` — what clicking its `✕` does.
+    pub fn compare_remove_at(&mut self, i: usize) {
+        let set = self.compare_symbols();
+        if let Some(symbol) = set.get(i).cloned() {
+            self.compare_toggle(&symbol);
+        }
+    }
+
+    /// Fetch history for a symbol that just joined the comparison but has none
+    /// cached. Silent when the cache can already answer.
+    fn warm_compare_history(&mut self, symbol: &str) {
+        let cached = self
+            .store
+            .bars(symbol, None)
+            .map(|b| !b.is_empty())
+            .unwrap_or(false);
+        if cached || symbol == self.selected {
+            return;
+        }
+        self.refreshed.insert(symbol.to_string(), Instant::now());
+        self.request(DataRequest::LoadSymbol(symbol.to_string()));
+    }
+
+    // --- the comparison's symbol picker ----------------------------------
+
+    /// Open the picker, primed with an empty query.
+    pub fn compare_picker_open(&mut self) {
+        self.screen = Screen::Compare;
+        self.compare.picker = Some(PickerState::default());
+        self.status = "Type to filter · Enter adds or removes · Esc closes".into();
+    }
+
+    pub fn compare_picker_close(&mut self) {
+        self.compare.picker = None;
+    }
+
+    /// The symbols the picker is offering, best match first.
+    ///
+    /// Ranked so the obvious answer is under the cursor without any scrolling:
+    /// a symbol that starts with what was typed beats one that merely contains
+    /// it, and beats a company-name-only match; ties break on turnover, which
+    /// is the market's own idea of prominence. With no query at all the list is
+    /// simply the most-traded names.
+    pub fn compare_picker_matches(&self) -> Vec<String> {
+        let Some(picker) = self.compare.picker.as_ref() else {
+            return Vec::new();
+        };
+        let needle = picker.query.trim().to_ascii_uppercase();
+
+        let name_of = |sym: &str| {
+            self.symbols
+                .get(sym)
+                .map(|i| i.name.to_ascii_uppercase())
+                .unwrap_or_default()
+        };
+        // Rank: 0 symbol prefix, 1 symbol substring, 2 name match.
+        let rank = |sym: &str| -> Option<u8> {
+            if needle.is_empty() {
+                return Some(0);
+            }
+            if sym.starts_with(&needle) {
+                Some(0)
+            } else if sym.contains(&needle) {
+                Some(1)
+            } else if name_of(sym).contains(&needle) {
+                Some(2)
+            } else {
+                None
+            }
+        };
+
+        let mut scored: Vec<(u8, f64, &str)> = self
+            .quotes
+            .iter()
+            .filter_map(|q| rank(&q.symbol).map(|r| (r, q.turnover(), q.symbol.as_str())))
+            .collect();
+
+        // Before the board lands — or for a listing that did not trade today —
+        // the master symbol list is the only thing to offer.
+        if scored.is_empty() {
+            scored = self
+                .symbols
+                .keys()
+                .filter_map(|s| rank(s).map(|r| (r, 0.0, s.as_str())))
+                .collect();
+        }
+
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(b.2)));
+        scored
+            .into_iter()
+            .take(MAX_PICKER_MATCHES)
+            .map(|(_, _, s)| s.to_string())
+            .collect()
+    }
+
+    /// Toggle the match at `i`, leaving the picker open so several symbols can
+    /// be added in one visit.
+    fn compare_pick(&mut self, i: usize) {
+        if let Some(symbol) = self.compare_picker_matches().get(i).cloned() {
+            self.compare_toggle(&symbol);
+            if let Some(picker) = self.compare.picker.as_mut() {
+                picker.cursor = i;
+            }
+            self.clamp_picker();
+        }
+    }
+
+    /// Keep the cursor inside the match list and inside the drawn window.
+    fn clamp_picker(&mut self) {
+        let len = self.compare_picker_matches().len();
+        let rows = self.picker_rows.get().max(1);
+        if let Some(picker) = self.compare.picker.as_mut() {
+            picker.cursor = picker.cursor.min(len.saturating_sub(1));
+            picker.offset = keep_visible(picker.cursor, picker.offset, rows);
+        }
+    }
+
+    /// Keys the picker swallows while it is open.
+    ///
+    /// Returns whether the key was consumed. Like the search prompt, it takes
+    /// plain characters before the global bindings see them, so typing `q` into
+    /// a query cannot quit the app.
+    fn on_picker_key(&mut self, key: KeyEvent) -> bool {
+        if self.compare.picker.is_none() {
+            return false;
+        }
+        // Ctrl-C must quit from anywhere, prompt or not.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        let len = self.compare_picker_matches().len();
+        let rows = self.picker_rows.get().max(1);
+
+        match key.code {
+            KeyCode::Esc => {
+                self.compare_picker_close();
+                return true;
+            }
+            KeyCode::Enter => {
+                let i = self.compare.picker.as_ref().map(|p| p.cursor).unwrap_or(0);
+                self.compare_pick(i);
+                return true;
+            }
+            _ => {}
+        }
+
+        let Some(picker) = self.compare.picker.as_mut() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Down => picker.cursor = step(picker.cursor, 1, len),
+            KeyCode::Up => picker.cursor = step(picker.cursor, -1, len),
+            KeyCode::PageDown => picker.cursor = step(picker.cursor, rows as isize, len),
+            KeyCode::PageUp => picker.cursor = step(picker.cursor, -(rows as isize), len),
+            KeyCode::Home => picker.cursor = 0,
+            KeyCode::End => picker.cursor = len.saturating_sub(1),
+            KeyCode::Backspace => {
+                picker.query.pop();
+                picker.cursor = 0;
+            }
+            // A typed character always edits the query — no exceptions, or the
+            // prompt would drop letters that happen to be bindings elsewhere.
+            KeyCode::Char(c) => {
+                picker.query.push(c);
+                picker.cursor = 0;
+            }
+            _ => return true,
+        }
+        self.clamp_picker();
+        true
     }
 
     /// The symbols the Compare screen overlays.
@@ -2022,7 +2273,9 @@ impl App {
             }
         };
 
-        if !self.compare.symbols.is_empty() {
+        // A non-empty set speaks for itself; `curated` is what distinguishes a
+        // set the user emptied from one they have not chosen yet.
+        if self.compare.curated || !self.compare.symbols.is_empty() {
             for s in &self.compare.symbols {
                 push(&mut out, s);
             }
@@ -2043,8 +2296,9 @@ impl App {
         out
     }
 
-    /// Compare screen: `[`/`]` cycle the window, `a` adds or removes the
-    /// selected symbol, `c` clears the set back to the watchlist seed.
+    /// Compare screen: `[`/`]` cycle the window, `a` opens the symbol picker,
+    /// `x` drops the selected symbol, `c` clears the set back to the watchlist
+    /// seed.
     fn on_compare_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char(']') | KeyCode::Right => {
@@ -2062,12 +2316,26 @@ impl App {
                     .unwrap_or(0);
                 self.compare.range = Range::ALL[(i + n - 1) % n];
             }
-            KeyCode::Char('a') => {
-                let selected = self.selected.clone();
-                self.compare_toggle(&selected);
+            // Adding is the common edit, so it gets the plainest key — and it
+            // opens the picker rather than acting on whatever happens to be
+            // selected elsewhere, which is invisible from this screen.
+            KeyCode::Char('a') | KeyCode::Char('+') => self.compare_picker_open(),
+            // Remove the symbol under the eye: the selected one if it is in the
+            // set, otherwise the chip added last.
+            KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace => {
+                let set = self.compare_symbols();
+                let victim = set
+                    .iter()
+                    .find(|s| **s == self.selected)
+                    .or_else(|| set.last())
+                    .cloned();
+                if let Some(symbol) = victim {
+                    self.compare_toggle(&symbol);
+                }
             }
             KeyCode::Char('c') => {
                 self.compare.symbols.clear();
+                self.compare.curated = false;
                 self.status = "Comparison reset to the watchlist".into();
             }
             _ => {}
@@ -3289,6 +3557,263 @@ mod tests {
             !a.compare_symbols().contains(&second),
             "double click removes it from the comparison"
         );
+    }
+
+    /// An app with a small market quoted, on the Compare screen.
+    fn compare_app() -> App {
+        let mut a = app();
+        a.on_event(DataEvent::Symbols(vec![
+            SymbolInfo {
+                symbol: "AAA".into(),
+                name: "Alpha Cement".into(),
+                sector_name: "CEMENT".into(),
+                is_etf: false,
+                is_debt: false,
+            },
+            SymbolInfo {
+                symbol: "BBB".into(),
+                name: "Beta Bank".into(),
+                sector_name: "BANKS".into(),
+                is_etf: false,
+                is_debt: false,
+            },
+            SymbolInfo {
+                symbol: "ZED".into(),
+                name: "Zed Cement Mills".into(),
+                sector_name: "CEMENT".into(),
+                is_etf: false,
+                is_debt: false,
+            },
+        ]));
+        a.on_event(DataEvent::Quotes(vec![
+            quote("AAA", 10.0, 1.0, 100.0),
+            quote("BBB", 20.0, 2.0, 200.0),
+            quote("ZED", 30.0, 3.0, 300.0),
+        ]));
+        a.screen = Screen::Compare;
+        a.selected = "AAA".into();
+        a
+    }
+
+    #[test]
+    fn clicking_a_chips_cross_removes_it_in_one_click() {
+        // The gesture the ✕ exists to provide: no double-click, and no
+        // selection side effect on the way.
+        let mut a = compare_app();
+        a.compare.symbols = vec!["AAA".into(), "BBB".into()];
+        put(&a, 1, Target::CompareRemove(1), Zone::Compare);
+
+        click(&mut a, 3, 1);
+        assert_eq!(a.compare_symbols(), vec!["AAA".to_string()]);
+        assert_eq!(a.selected, "AAA", "removing must not move the selection");
+    }
+
+    #[test]
+    fn removing_a_chip_is_bounds_checked_against_a_stale_hit_map() {
+        let mut a = compare_app();
+        a.compare.symbols = vec!["AAA".into()];
+        put(&a, 1, Target::CompareRemove(9), Zone::Compare);
+        click(&mut a, 3, 1);
+        assert_eq!(a.compare_symbols(), vec!["AAA".to_string()]);
+    }
+
+    #[test]
+    fn a_and_the_add_chip_both_open_the_picker() {
+        let mut a = compare_app();
+        a.on_key(key('a'));
+        assert!(a.compare.picker.is_some());
+        a.compare_picker_close();
+
+        put(&a, 1, Target::CompareAdd, Zone::Compare);
+        click(&mut a, 3, 1);
+        assert!(a.compare.picker.is_some());
+    }
+
+    #[test]
+    fn the_picker_filters_by_symbol_then_by_company_name() {
+        let mut a = compare_app();
+        a.compare_picker_open();
+
+        // No query: the whole market, most-traded first.
+        assert_eq!(a.compare_picker_matches(), vec!["ZED", "BBB", "AAA"]);
+
+        for c in "bet".chars() {
+            a.on_key(key(c));
+        }
+        assert_eq!(
+            a.compare_picker_matches(),
+            vec!["BBB"],
+            "a company name must be searchable, not just the ticker"
+        );
+
+        // Backspace walks the query back to a symbol-prefix match.
+        for _ in 0..3 {
+            a.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        for c in "z".chars() {
+            a.on_key(key(c));
+        }
+        assert_eq!(a.compare_picker_matches(), vec!["ZED"]);
+    }
+
+    #[test]
+    fn a_symbol_prefix_outranks_a_name_only_match() {
+        let mut a = compare_app();
+        a.compare_picker_open();
+        for c in "ze".chars() {
+            a.on_key(key(c));
+        }
+        // ZED starts with the query; "Alpha Cement" doesn't match at all, but
+        // "Zed Cement Mills" would also be found by "cement".
+        assert_eq!(a.compare_picker_matches().first().unwrap(), "ZED");
+    }
+
+    #[test]
+    fn the_picker_adds_and_removes_without_closing() {
+        let mut a = compare_app();
+        a.compare.symbols = vec!["AAA".into()];
+        a.compare_picker_open();
+        for c in "zed".chars() {
+            a.on_key(key(c));
+        }
+
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(a.compare_symbols().contains(&"ZED".to_string()));
+        assert!(a.compare.picker.is_some(), "adding several needs it open");
+
+        // The same row now removes: one list, both directions.
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!a.compare_symbols().contains(&"ZED".to_string()));
+    }
+
+    #[test]
+    fn adding_an_uncached_symbol_fetches_its_history() {
+        // Otherwise it joins the overlay as a permanently empty row.
+        let (tx, mut rx) = detached_channel();
+        let mut a = App::new(Arc::new(Store::open_in_memory().unwrap()), tx);
+        a.screen = Screen::Compare;
+        a.compare_toggle("ZED");
+
+        let mut sent = Vec::new();
+        while let Ok(req) = rx.try_recv() {
+            sent.push(req);
+        }
+        assert!(
+            sent.iter()
+                .any(|r| matches!(r, DataRequest::LoadSymbol(s) if s == "ZED")),
+            "expected a fetch for the added symbol, got {sent:?}"
+        );
+    }
+
+    #[test]
+    fn the_picker_swallows_typing_that_would_otherwise_be_a_binding() {
+        let mut a = compare_app();
+        a.compare_picker_open();
+        for c in "qcw".chars() {
+            a.on_key(key(c));
+        }
+        assert!(!a.should_quit, "typing q into the picker must not quit");
+        assert_eq!(a.compare.picker.as_ref().unwrap().query, "qcw");
+
+        // Ctrl-C still quits, prompt or not.
+        a.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(a.should_quit);
+    }
+
+    #[test]
+    fn escape_and_a_click_outside_both_close_the_picker() {
+        let mut a = compare_app();
+        a.compare_picker_open();
+        a.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(a.compare.picker.is_none());
+
+        a.compare_picker_open();
+        put(&a, 1, Target::CompareRange(0), Zone::Compare);
+        click(&mut a, 3, 1);
+        assert!(
+            a.compare.picker.is_none(),
+            "a click off it means never mind"
+        );
+        assert_eq!(
+            a.compare.range,
+            Range::Y1,
+            "and that click is spent closing, not on what it landed on"
+        );
+    }
+
+    #[test]
+    fn clicking_a_picker_row_toggles_that_row() {
+        let mut a = compare_app();
+        a.compare.symbols = vec!["AAA".into()];
+        a.compare_picker_open();
+
+        let second = a.compare_picker_matches()[1].clone();
+        put(&a, 4, Target::ComparePick(1), Zone::ComparePicker);
+        click(&mut a, 3, 4);
+        assert!(a.compare_symbols().contains(&second));
+    }
+
+    #[test]
+    fn x_removes_the_selected_symbol_from_the_comparison() {
+        let mut a = compare_app();
+        a.compare.symbols = vec!["AAA".into(), "BBB".into()];
+        a.selected = "BBB".into();
+        a.on_key(key('x'));
+        assert_eq!(a.compare_symbols(), vec!["AAA".to_string()]);
+
+        // With the selection outside the set it drops the newest chip, so the
+        // key is never a no-op the user has to puzzle over.
+        a.selected = "ZED".into();
+        a.on_key(key('x'));
+        assert!(a.compare_symbols().is_empty());
+    }
+
+    #[test]
+    fn the_picker_cursor_and_wheel_stay_inside_the_match_list() {
+        let mut a = compare_app();
+        a.compare_picker_open();
+        for _ in 0..20 {
+            a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(a.compare.picker.as_ref().unwrap().cursor, 2);
+
+        put(&a, 4, Target::ComparePick(0), Zone::ComparePicker);
+        wheel(&mut a, 3, 4, false);
+        assert_eq!(a.compare.picker.as_ref().unwrap().cursor, 0);
+
+        // A query that matches nothing must not leave the cursor dangling.
+        for c in "zzzz".chars() {
+            a.on_key(key(c));
+        }
+        assert!(a.compare_picker_matches().is_empty());
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.compare.picker.as_ref().unwrap().cursor, 0);
+    }
+
+    #[test]
+    fn slash_opens_the_picker_on_compare_and_the_search_elsewhere() {
+        let mut a = compare_app();
+        a.on_key(key('/'));
+        assert!(a.compare.picker.is_some());
+        assert_eq!(
+            a.screen,
+            Screen::Compare,
+            "it must not jump to the screener"
+        );
+
+        let mut b = app();
+        b.on_key(key('/'));
+        assert_eq!(b.screen, Screen::Screener);
+        assert!(b.search.is_some());
+    }
+
+    #[test]
+    fn the_comparison_is_capped_and_says_so() {
+        let mut a = compare_app();
+        a.compare.symbols = (0..MAX_COMPARE).map(|i| format!("S{i}")).collect();
+        a.compare_toggle("ZED");
+        assert_eq!(a.compare_symbols().len(), MAX_COMPARE);
+        assert!(a.status.contains("remove one first"));
     }
 
     #[test]

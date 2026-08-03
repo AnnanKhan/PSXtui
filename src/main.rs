@@ -22,8 +22,42 @@ const AUTO_REFRESH: Duration = Duration::from_secs(60);
 /// Busy-spinner frame rate.
 const SPINNER_TICK: Duration = Duration::from_millis(110);
 
+/// What `--help` prints. The whole command-line surface is two flags: the app
+/// is driven from inside itself, and `?` is the real help.
+const USAGE: &str = "\
+psxtui — a terminal client for Pakistan Stock Exchange market data
+
+Usage: psxtui [OPTIONS]
+
+Options:
+  -h, --help       show this message
+  -V, --version    show the version
+
+Everything else happens inside the app: press ? for keys, q to quit.
+Cached data lives in ~/.local/share/psxtui/psx.db
+";
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Anything on PATH is expected to answer --version and --help without
+    // seizing the terminal, not least so an installer can verify itself.
+    if let Some(arg) = std::env::args().nth(1) {
+        match arg.as_str() {
+            "-V" | "--version" => {
+                println!("psxtui {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "-h" | "--help" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            other => {
+                eprint!("psxtui: unknown option '{other}'\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let store = Arc::new(Store::open_default().context("opening local cache")?);
     let client = Arc::new(PsxClient::new()?);
 

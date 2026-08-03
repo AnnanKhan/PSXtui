@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 use ratatui::prelude::*;
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::hit::{Target, Zone};
 use super::{theme, widgets};
@@ -33,6 +33,14 @@ const RISK_FREE: f64 = 0.11;
 
 /// Below this many aligned sessions the overlay and the statistics are noise.
 const MIN_SESSIONS: usize = 5;
+
+/// The remove affordance drawn after every chip, and its width in cells.
+const REMOVE_CHIP: &str = "✕ ";
+const REMOVE_W: u16 = 2;
+
+/// The add affordance drawn after the last chip, and its width in cells.
+const ADD_CHIP: &str = "+ Add ";
+const ADD_W: u16 = 6;
 
 /// Distinct hues for the overlay, one per compared symbol.
 ///
@@ -316,6 +324,131 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             draw_matrix(f, matrix_area, &view);
         }
     }
+
+    // Last, so its targets sit on top of the screen it floats over.
+    if app.compare.picker.is_some() {
+        draw_picker(f, area, app, &view);
+    }
+}
+
+/// The add-symbol picker: a query line over a ranked list of the market.
+///
+/// Symbols already in the comparison are shown ticked rather than hidden, so
+/// the same list both adds and removes — one place to manage the set instead of
+/// a chip row for removing and somewhere else entirely for adding.
+fn draw_picker(f: &mut Frame, area: Rect, app: &App, view: &View) {
+    let Some(picker) = app.compare.picker.as_ref() else {
+        return;
+    };
+
+    let area = widgets::centered_rect(58, 70, area);
+    if area.width < 12 || area.height < 5 {
+        // Too small to be honest about what it is offering.
+        app.picker_rows.set(1);
+        return;
+    }
+    f.render_widget(Clear, area);
+    app.hits.borrow_mut().zone(area, Zone::ComparePicker);
+
+    let block = Block::bordered()
+        .border_style(Style::new().fg(theme::ACCENT))
+        .title(Span::styled(" Add to comparison ", theme::title_style()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let [prompt, list, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" › ", Style::new().fg(theme::ACCENT)),
+            Span::styled(picker.query.clone(), Style::new().fg(theme::FG)),
+            Span::styled("█", Style::new().fg(theme::ACCENT)),
+        ])),
+        prompt,
+    );
+
+    let matches = app.compare_picker_matches();
+    let rows = list.height as usize;
+    // Published for the key handler, which needs the same page size the user
+    // can see; without it PgDn would scroll past the end of the window.
+    app.picker_rows.set(rows.max(1));
+
+    if matches.is_empty() {
+        f.render_widget(
+            Paragraph::new(widgets::placeholder(" No symbol matches that")),
+            list,
+        );
+    } else {
+        let in_set: Vec<&String> = view.rows.iter().map(|r| &r.symbol).collect();
+        let offset = picker.offset.min(matches.len().saturating_sub(1));
+        let mut lines = Vec::new();
+        for (i, symbol) in matches.iter().enumerate().skip(offset).take(rows) {
+            let picked = in_set.contains(&symbol);
+            let selected = i == picker.cursor;
+            let name = app
+                .symbols
+                .get(symbol)
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+            let change = app
+                .quotes
+                .iter()
+                .find(|q| q.symbol == *symbol)
+                .map(|q| q.change_pct);
+
+            let width = list.width as usize;
+            let tail = change.map(theme::pct).unwrap_or_default();
+            // Symbol and tick are fixed; the company name gets whatever is
+            // left after the change column, so nothing wraps or overflows.
+            let name_w = width.saturating_sub(12 + tail.chars().count() + 2);
+            let mut spans = vec![
+                Span::styled(
+                    if picked { " ✓ " } else { "   " },
+                    Style::new().fg(theme::UP),
+                ),
+                Span::styled(
+                    format!("{:<9}", theme::truncate(symbol, 9)),
+                    Style::new()
+                        .fg(if picked { theme::ACCENT } else { theme::FG })
+                        .bold(),
+                ),
+                Span::styled(
+                    format!("{:<name_w$}", theme::truncate(&name, name_w)),
+                    theme::label_style(),
+                ),
+            ];
+            if let Some(c) = change {
+                spans.push(Span::styled(
+                    format!(" {tail}"),
+                    Style::new().fg(theme::change_color(c)),
+                ));
+            }
+
+            let mut line = Line::from(spans);
+            if selected {
+                line = line.style(Style::new().bg(theme::SELECT_BG));
+            }
+            lines.push(line);
+        }
+        f.render_widget(Paragraph::new(Text::from(lines)), list);
+
+        app.hits
+            .borrow_mut()
+            .rows(list, offset, matches.len() - offset, Target::ComparePick);
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " ↑↓ move · Enter add / remove · Esc close",
+            theme::label_style(),
+        ))),
+        hint,
+    );
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
@@ -329,11 +462,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
     // Chips are laid out by walking the spans, the same way the chart header
     // places its buttons: the width of what was pushed is the width of what
     // the terminal will show, so the two can't drift apart.
+    //
+    // Each chip is two targets, not one: the name selects, and the ✕ beside it
+    // removes. Removal used to be a double-click on the name — a gesture with
+    // nothing on screen to advertise it, and one that fires a selection first.
     let mut x = inner.x + " Symbols ".len() as u16;
     let mut names = vec![Span::styled(" Symbols ", theme::label_style())];
-    for (i, row) in view.rows.iter().enumerate() {
-        let text = format!("{} ", row.symbol);
-        let w = text.chars().count() as u16;
+    let mark = |app: &App, x: u16, w: u16, target: Target| {
         if x < inner.right() {
             app.hits.borrow_mut().target(
                 Rect {
@@ -342,9 +477,15 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
                     width: w.min(inner.right() - x),
                     height: 1,
                 },
-                Target::CompareSymbol(i),
+                target,
             );
         }
+    };
+
+    for (i, row) in view.rows.iter().enumerate() {
+        let text = format!("{} ", row.symbol);
+        let w = text.chars().count() as u16;
+        mark(app, x, w, Target::CompareSymbol(i));
         x = x.saturating_add(w);
         names.push(Span::styled(
             text,
@@ -354,7 +495,27 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
                 Style::new().fg(theme::DIM)
             },
         ));
+
+        mark(app, x, REMOVE_W, Target::CompareRemove(i));
+        x = x.saturating_add(REMOVE_W);
+        names.push(Span::styled(REMOVE_CHIP, Style::new().fg(theme::DIM)));
     }
+
+    // The one affordance that says the set can grow. Drawn dim once full, so
+    // the cap explains itself rather than the chip simply vanishing.
+    let room = view.rows.len() < MAX_COMPARE;
+    if room {
+        mark(app, x, ADD_W, Target::CompareAdd);
+    }
+    names.push(Span::styled(
+        ADD_CHIP,
+        if room {
+            Style::new().fg(theme::ACCENT).bold()
+        } else {
+            Style::new().fg(theme::DIM)
+        },
+    ));
+
     names.push(Span::styled(
         format!("· {} aligned sessions ", view.sessions),
         theme::label_style(),
@@ -398,7 +559,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View) {
         ));
     }
     ranges.push(Span::styled(
-        "  [ ] range · click a symbol to select, again to remove · c reset",
+        "  [ ] range · a add · x remove · c reset",
         theme::label_style(),
     ));
 
@@ -418,7 +579,7 @@ fn draw_overlay(f: &mut Frame, area: Rect, view: &View) {
 
     if view.sessions < MIN_SESSIONS || view.curves.len() < 2 {
         let msg = if view.curves.len() < 2 {
-            "Need two symbols with cached history — press a to add the selected one".to_string()
+            "Need two symbols with history — press a or click + Add to pick one".to_string()
         } else {
             format!(
                 "Only {} sessions are shared by all {} symbols — widen the range with ]",
@@ -868,11 +1029,90 @@ mod tests {
             App::new(store, tx)
         };
 
-        for app in [&full, &missing, &single, &flat, &empty] {
+        // The picker floats over all of it, at every size, with and without
+        // matches to show.
+        let mut picking = app_with(&[("HBL", series(300, 100.0, 0.001))]);
+        picking.compare.picker = Some(crate::app::PickerState::default());
+        let mut no_match = app_with(&[("HBL", series(300, 100.0, 0.001))]);
+        no_match.compare.picker = Some(crate::app::PickerState {
+            query: "NOTHINGMATCHES".into(),
+            ..Default::default()
+        });
+        // An emptied comparison: the screen must still explain itself.
+        let mut none = app_with(&[("HBL", series(300, 100.0, 0.001))]);
+        none.compare.curated = true;
+        none.compare.symbols.clear();
+
+        for app in [
+            &full, &missing, &single, &flat, &empty, &picking, &no_match, &none,
+        ] {
             for (w, h) in [(20u16, 10u16), (1, 1), (40, 12), (80, 24), (200, 60)] {
                 render(app, w, h);
             }
         }
+    }
+
+    #[test]
+    fn the_add_and_remove_affordances_are_clickable_where_they_are_drawn() {
+        // The chips are laid out by hand, so this checks the hit rects against
+        // what was actually rendered rather than against the same arithmetic.
+        let app = app_with(&[
+            ("HBL", series(300, 100.0, 0.001)),
+            ("OGDC", series(300, 220.0, -0.0005)),
+        ]);
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, f.area(), &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // Row 1 of the frame is the chip line (row 0 is the panel border).
+        let row: String = (0..buf.area.width)
+            .map(|x| buf[(x, 1)].symbol().to_string())
+            .collect();
+
+        let cross = row.chars().position(|c| c == '✕').unwrap() as u16;
+        assert_eq!(
+            app.hits.borrow().target_at(cross, 1),
+            Some(Target::CompareRemove(0)),
+            "the first ✕ must drop the first chip, not select it"
+        );
+
+        let add = row.find("+ Add").expect("the add chip must be drawn");
+        let add = row[..add].chars().count() as u16;
+        assert_eq!(
+            app.hits.borrow().target_at(add + 1, 1),
+            Some(Target::CompareAdd)
+        );
+    }
+
+    #[test]
+    fn picker_rows_are_clickable_and_the_window_is_published() {
+        let mut app = app_with(&[("HBL", series(300, 100.0, 0.001))]);
+        app.symbols.insert(
+            "HBL".into(),
+            crate::model::SymbolInfo {
+                symbol: "HBL".into(),
+                name: "Habib Bank Limited".into(),
+                sector_name: "COMMERCIAL BANKS".into(),
+                is_etf: false,
+                is_debt: false,
+            },
+        );
+        app.compare.picker = Some(crate::app::PickerState::default());
+        render(&app, 120, 30);
+
+        assert!(
+            app.picker_rows.get() > 1,
+            "the key handler pages by what was drawn"
+        );
+        // Somewhere inside the overlay there is a clickable match row.
+        let hit = (0..30)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .find_map(|(x, y)| match app.hits.borrow().target_at(x, y) {
+                Some(Target::ComparePick(i)) => Some(i),
+                _ => None,
+            });
+        assert_eq!(hit, Some(0), "the first drawn row is the first match");
     }
 
     #[test]

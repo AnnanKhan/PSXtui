@@ -2,6 +2,8 @@
 name = "psxtui"
 version = "0.1.0"
 edition = "2024"
+# Let-chains, which the code uses throughout, landed in 1.88.
+rust-version = "1.88"
 
 [dependencies]
 anyhow = "1.0.104"

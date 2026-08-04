@@ -28,7 +28,7 @@ jobs:
           # a compiler, NASM, CMake or the Visual Studio build tools.
           - { os: windows-latest, target: x86_64-pc-windows-msvc,    ext: zip }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -61,7 +61,7 @@ jobs:
           (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash |
             Out-File "dist/$name.zip.sha256" -Encoding ascii
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.target }}
           path: |
@@ -74,7 +74,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           path: dist
           merge-multiple: true

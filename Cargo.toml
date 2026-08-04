@@ -11,9 +11,19 @@ chrono = "0.4.45"
 crossterm = "0.29.0"
 directories = "6.0.0"
 ratatui = "0.30.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "gzip", "rustls", "http2", "charset"] }
+# `rustls-no-provider` rather than `rustls`: the latter pins aws-lc-rs, whose
+# aws-lc-sys build needs NASM and CMake on Windows. ring needs only a C
+# compiler, which every supported toolchain already has. The provider is
+# installed at runtime — see psx::client::install_crypto_provider.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "gzip", "rustls-no-provider", "http2", "charset"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }
+
+# A console left on a regional code page renders every box-drawing and braille
+# glyph as mojibake, so the app switches it to UTF-8 on the way in.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

@@ -45,10 +45,12 @@ Timeframes: 5D, 1M, 3M, 6M, YTD, 1Y, 2Y, 3Y, 5Y and MAX.
 
 ## Install
 
-No API key, no account, no configuration. You need a terminal with 256-colour
-and Unicode support, and Rust **1.88 or newer** (the code uses let-chains).
+Runs on **Linux, macOS and Windows**. No API key, no account, no configuration —
+just a terminal with 256-colour and Unicode support. Building from source needs
+Rust **1.88 or newer** (the code uses let-chains); the prebuilt binaries on the
+[releases page](https://github.com/AnnanKhan/PSXtui/releases) need nothing at all.
 
-### The script
+### Linux and macOS — the script
 
 `install.sh` does the whole thing end to end: it installs a Rust toolchain if
 there isn't a usable one, builds a release binary, and puts `psxtui` on your
@@ -71,6 +73,40 @@ psxtui
 It only appends to `~/.bashrc` / `~/.zshrc` / `~/.profile` when `~/.cargo/bin`
 is genuinely missing from your PATH, and prints every step as it goes. Re-run it
 any time to update after a `git pull`.
+
+### Windows
+
+`install.ps1` downloads the prebuilt `psxtui.exe` — no Rust, no Visual Studio,
+nothing to compile — and puts it on your PATH:
+
+```powershell
+git clone https://github.com/AnnanKhan/PSXtui.git
+cd PSXtui
+.\install.ps1
+psxtui
+```
+
+Or skip the clone entirely: download `psxtui-<version>-x86_64-pc-windows-msvc.zip`
+from the [releases page](https://github.com/AnnanKhan/PSXtui/releases) and put the
+`.exe` wherever you keep such things.
+
+| Flag | Effect |
+|------|--------|
+| *(none)* | Download the released binary into `%LOCALAPPDATA%\Programs\psxtui` |
+| `-FromSource` | Build it with cargo instead (needs Rust + the VS C++ build tools) |
+| `-NoModifyPath` | Never touch the user PATH |
+| `-Uninstall` | Remove the binary and its PATH entry; the cache stays |
+
+**Use [Windows Terminal](https://aka.ms/terminal).** It is what does truecolour,
+mouse reporting and the box-drawing glyphs the whole UI is built from; the legacy
+`conhost` console will look wrong. If the charts come out as empty boxes your font
+has no braille — install a [Nerd Font](https://www.nerdfonts.com/), or run with
+`PSXTUI_MARKER=block` (see [Environment](#environment)).
+
+Building from source on Windows additionally needs the **Visual Studio C++ build
+tools** for the bundled SQLite — `winget install Microsoft.VisualStudio.2022.BuildTools`,
+with the "Desktop development with C++" workload. Nothing else: TLS is rustls
+over *ring*, deliberately, so there is no NASM, CMake or OpenSSL to install.
 
 ### By hand
 
@@ -106,14 +142,30 @@ packages to hunt down — but compiling that bundled SQLite needs a C compiler:
 `build-essential` on Debian/Ubuntu, `gcc` on Fedora, `xcode-select --install` on
 macOS.
 
-**Uninstalling.** `./install.sh --uninstall`, or `cargo uninstall psxtui`. Both
-leave your cache and watchlist at `~/.local/share/psxtui/psx.db`; delete that
-file to remove them too.
+**Uninstalling.** `./install.sh --uninstall` (`.\install.ps1 -Uninstall` on
+Windows), or `cargo uninstall psxtui`. All of them leave your cache and
+watchlist alone; delete the database below to remove those too.
 
 ```
 psxtui --version    # 0.1.0
-psxtui --help       # the two flags there are; everything else is inside the app
+psxtui --help       # the two flags there are, plus where your data lives
 ```
+
+### Where things live
+
+| Platform | Cache and watchlist |
+|----------|---------------------|
+| Linux | `~/.local/share/psxtui/psx.db` |
+| macOS | `~/Library/Application Support/psxtui/psx.db` |
+| Windows | `%APPDATA%\psxtui\data\psx.db` |
+
+`psxtui --help` prints the real path for the machine it is running on.
+
+### Environment
+
+| Variable | Effect |
+|----------|--------|
+| `PSXTUI_MARKER=block` | Draw every chart with half-block glyphs instead of braille. Half the vertical resolution, but it renders in any font — the escape hatch when braille shows up as boxes. |
 
 ## Keys
 
@@ -128,7 +180,7 @@ Press `?` in the app for the full list.
 | `W` / `e` | Watchlist only / equities only |
 | `w` | Add or remove the current symbol from the watchlist |
 | `[` / `]` | Chart range · `i` cycles the indicator pane |
-| `c` | Chart style: candles → line → dots → area |
+| `c` | Chart style: candles → line → dots → area (braille; `PSXTUI_MARKER=block` forces half-blocks) |
 | `m` / `e` / `b` | Toggle SMA / EMA / Bollinger overlays |
 | `a` / `x` | Compare: add a symbol (opens the picker) / remove one · `c` resets |
 | `r` | Refresh · `q` quit |
@@ -278,6 +330,12 @@ the parsers handle markup we wrote ourselves.
 `capture.sh` drives the real binary in a fixed-size tmux pane and photographs
 every screen, so the images above are reproducible rather than hand-cropped.
 They show live PSX data from the session they were captured in.
+
+CI (`.github/workflows/ci.yml`) runs the tests on Linux, macOS **and Windows** —
+development happens on Linux, so the Windows job is the only thing keeping that
+support honest. `release.yml` builds the prebuilt binaries for every platform on
+a `v*` tag; its Windows archive name is a contract with `install.ps1`, which
+looks for an asset ending in `x86_64-pc-windows-msvc.zip`.
 
 ## Notes
 

@@ -4,7 +4,10 @@
 //! volume the same way — the tables line up and the eye can scan a column
 //! without re-reading units.
 
+use std::sync::OnceLock;
+
 use ratatui::prelude::*;
+use ratatui::symbols::Marker;
 
 // --- palette -------------------------------------------------------------
 
@@ -171,9 +174,76 @@ pub fn truncate(s: &str, width: usize) -> String {
     out
 }
 
+// --- canvas markers ------------------------------------------------------
+
+/// The marker a canvas should actually draw with.
+///
+/// Braille packs 2x4 dots into one cell, which is the resolution every chart
+/// here is drawn against — but a font without U+2800–U+28FF renders the lot as
+/// boxes, which is the state some Windows console fonts ship in. Setting
+/// `PSXTUI_MARKER=block` falls back to half-blocks: half the vertical
+/// resolution, and present in any font that can draw the rest of the UI.
+///
+/// Passing a non-braille marker through is deliberate — the chart's line and
+/// area styles already use half-blocks, and the override has nothing to say
+/// about them.
+pub fn marker(preferred: Marker) -> Marker {
+    static BLOCK: OnceLock<bool> = OnceLock::new();
+    let block = *BLOCK.get_or_init(|| {
+        std::env::var("PSXTUI_MARKER")
+            .map(|v| block_requested(&v))
+            .unwrap_or(false)
+    });
+
+    resolve(block, preferred)
+}
+
+/// The mapping itself, split out so it can be tested without the process-wide
+/// environment read that decides `block`.
+fn resolve(block: bool, preferred: Marker) -> Marker {
+    match (block, preferred) {
+        (true, Marker::Braille) => Marker::HalfBlock,
+        _ => preferred,
+    }
+}
+
+/// Whether a `PSXTUI_MARKER` value asks for the block fallback.
+///
+/// Anything unrecognised means braille: the variable exists to rescue a broken
+/// display, so a typo must not silently degrade a working one.
+fn block_requested(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "block" | "blocks"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_block_asks_for_the_fallback() {
+        assert!(block_requested("block"));
+        assert!(block_requested("BLOCK"));
+        assert!(block_requested(" blocks "));
+
+        assert!(!block_requested("braille"));
+        assert!(!block_requested(""));
+        assert!(
+            !block_requested("blocky"),
+            "a typo must not degrade a good display"
+        );
+    }
+
+    #[test]
+    fn the_override_only_touches_braille() {
+        assert_eq!(resolve(true, Marker::Braille), Marker::HalfBlock);
+        assert_eq!(resolve(false, Marker::Braille), Marker::Braille);
+        // A style that already asked for half-blocks is unaffected either way.
+        assert_eq!(resolve(true, Marker::HalfBlock), Marker::HalfBlock);
+        assert_eq!(resolve(false, Marker::HalfBlock), Marker::HalfBlock);
+    }
 
     #[test]
     fn groups_thousands_in_prices() {

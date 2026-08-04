@@ -46,7 +46,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
         removed=1
     done
     [ "$removed" -eq 1 ] || warn "no psxtui binary found on this machine"
-    say "cache and watchlist left alone: ~/.local/share/psxtui/psx.db"
+    say "cache and watchlist left alone in your platform data directory"
     exit 0
 fi
 
@@ -155,7 +155,7 @@ cat <<'EOF'
 
   Run it with:   psxtui
   Keys:          ? inside the app
-  Data lives in: ~/.local/share/psxtui/psx.db
+  Data lives in: the path printed by `psxtui --help`
 
 The first launch fetches the market board and backfills ~120 days of history in
 the background — it is usable immediately and gets richer as that lands.

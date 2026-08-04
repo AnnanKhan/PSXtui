@@ -119,13 +119,13 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App) {
     let datasets = vec![
         Dataset::default()
             .name("Price")
-            .marker(Marker::Braille)
+            .marker(theme::marker(Marker::Braille))
             .graph_type(GraphType::Line)
             .style(Style::new().fg(theme::ACCENT))
             .data(&price_pts),
         Dataset::default()
             .name("VWAP")
-            .marker(Marker::Braille)
+            .marker(theme::marker(Marker::Braille))
             .graph_type(GraphType::Line)
             .style(Style::new().fg(theme::WARN))
             .data(&vwap_pts),

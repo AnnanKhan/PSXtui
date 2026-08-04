@@ -33,6 +33,9 @@ pub struct ExtClient {
 
 impl ExtClient {
     pub fn new() -> Result<Self> {
+        // Whichever client is built first installs it; see the PSX one for why
+        // there is no compiled-in default to fall back on.
+        crate::psx::client::install_crypto_provider();
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(REQUEST_TIMEOUT)

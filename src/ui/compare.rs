@@ -743,7 +743,7 @@ fn draw_overlay(f: &mut Frame, area: Rect, view: &View) {
 
     let canvas = Canvas::default()
         .block(Block::default())
-        .marker(symbols::Marker::Braille)
+        .marker(theme::marker(symbols::Marker::Braille))
         .x_bounds([0.0, n - 1.0])
         .y_bounds([lo, hi])
         .paint(move |ctx| {

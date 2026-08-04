@@ -325,7 +325,7 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         .block(Block::default())
         // Braille for candles (sub-cell wick precision), half-blocks for the
         // line styles (a continuous stroke instead of a dotted trail).
-        .marker(style.marker())
+        .marker(theme::marker(style.marker()))
         .x_bounds([0.0, candles_ref.len().max(1) as f64])
         .y_bounds([lo, hi])
         .paint(move |ctx| {
@@ -744,7 +744,7 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
 
     let n = buckets.len().max(1);
     let canvas = Canvas::default()
-        .marker(symbols::Marker::Braille)
+        .marker(theme::marker(symbols::Marker::Braille))
         .x_bounds([0.0, n as f64])
         .y_bounds([bounds.0, bounds.1])
         .paint(move |ctx| {

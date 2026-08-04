@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A CI failure should be the code, not a flaky crates.io fetch.
+  CARGO_NET_RETRY: 3
+
+jobs:
+  # The matrix exists for one reason: psxtui is developed on Linux, and the
+  # only way a Windows or macOS claim stays true is if something compiles and
+  # runs the tests there on every push.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # --all-targets compiles the examples too, which is exactly as far as
+      # live_smoke should go here: it talks to the live portal, so CI builds
+      # it and never runs it.
+      - name: Test
+        run: cargo test --all-targets
+
+  # Formatting and lints are platform-independent, so paying for them three
+  # times buys nothing.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  # install.ps1 can only be parsed by PowerShell, and it is the file a Windows
+  # user runs first — a syntax error in it is the worst possible first
+  # impression.
+  scripts:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse install.ps1
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+          Write-Host "install.ps1 parses cleanly"
+      - name: Check install.ps1 switches
+        shell: pwsh
+        run: pwsh -NoProfile -File ./install.ps1 -Uninstall
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh -n install.sh && sh -n docs/capture.sh

@@ -25,6 +25,24 @@ const MIN_REQUEST_GAP: Duration = Duration::from_millis(350);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_RETRIES: u32 = 3;
 
+/// Install the process-wide rustls crypto provider.
+///
+/// The crate takes reqwest's `rustls-no-provider` feature so that no
+/// aws-lc-rs — and therefore no NASM or CMake on Windows — is pulled into the
+/// build. The cost is that rustls has no compiled-in default: every
+/// `Client::builder().build()` fails until one is installed. Both HTTP clients
+/// call this first, so tests, examples and the app are all covered wherever
+/// they start from.
+///
+/// A second call is a no-op, and a provider installed by someone else wins —
+/// this is a library, and it has no business overriding an embedder's choice.
+pub fn install_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 pub struct PsxClient {
     http: reqwest::Client,
     /// Timestamp of the last request, used to enforce [`MIN_REQUEST_GAP`].
@@ -33,6 +51,7 @@ pub struct PsxClient {
 
 impl PsxClient {
     pub fn new() -> Result<Self> {
+        install_crypto_provider();
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(REQUEST_TIMEOUT)

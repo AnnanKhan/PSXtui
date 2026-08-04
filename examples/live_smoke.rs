@@ -142,7 +142,52 @@ async fn main() -> Result<()> {
         );
     }
 
+    external().await;
+
     Ok(())
+}
+
+/// The Macro screen's feeds, which live on entirely different hosts — and
+/// therefore behind different certificate chains — from the PSX portal.
+///
+/// Every one of these degrades to an empty result rather than an error, so
+/// this reports counts and lets the reader judge: zero series across the board
+/// means the transport is broken, not that Yahoo changed a field name.
+async fn external() {
+    let Ok(client) = psxtui::ext::ExtClient::new() else {
+        println!("\n== external == client could not be built");
+        return;
+    };
+
+    println!("\n== Yahoo chart API ==");
+    let (series, errors) = psxtui::ext::quotes::fetch_all(&client).await;
+    println!("{} series, {} failed", series.len(), errors.len());
+    for s in series.iter().take(3) {
+        println!(
+            "  {:<10} {} bars, last {:?}",
+            s.name,
+            s.bars.len(),
+            s.bars.last().map(|b| b.close)
+        );
+    }
+    for e in errors.iter().take(3) {
+        println!("  ! {e}");
+    }
+
+    println!("\n== RSS headlines ==");
+    let (headlines, errors) = psxtui::ext::fetch_headlines(&client).await;
+    println!(
+        "{} headlines, {} feeds failed",
+        headlines.len(),
+        errors.len()
+    );
+    if let Some(h) = headlines.first() {
+        println!("  {} — {}", h.source, h.title);
+    }
+
+    println!("\n== SBP policy rate ==");
+    let rates = psxtui::ext::fetch_rates(&client).await;
+    println!("  {rates:?}");
 }
 
 fn periods(v: &[psxtui::model::FinancialPeriod]) -> Vec<&str> {

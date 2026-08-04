@@ -1,0 +1,11 @@
+# A Windows clone with core.autocrlf=true rewrites these with CRLF, and a
+# shell script whose shebang ends in \r fails with a baffling "bad
+# interpreter" on every other platform. PowerShell is the mirror case.
+*.sh    text eol=lf
+*.ps1   text eol=crlf
+
+# Screenshots must never be line-ending "fixed".
+*.png   binary
+
+# Keep the lockfile in the diff — it is how the TLS backend is pinned.
+Cargo.lock text

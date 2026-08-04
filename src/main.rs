@@ -24,7 +24,16 @@ const SPINNER_TICK: Duration = Duration::from_millis(110);
 
 /// What `--help` prints. The whole command-line surface is two flags: the app
 /// is driven from inside itself, and `?` is the real help.
-const USAGE: &str = "\
+///
+/// The cache path is resolved at run time rather than written in: it differs on
+/// every platform, and a help text that names the wrong directory is worse than
+/// one that names none.
+fn usage() -> String {
+    let db = psxtui::cache::default_db_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "your platform data directory".into());
+    format!(
+        "\
 psxtui — a terminal client for Pakistan Stock Exchange market data
 
 Usage: psxtui [OPTIONS]
@@ -33,12 +42,39 @@ Options:
   -h, --help       show this message
   -V, --version    show the version
 
+Environment:
+  PSXTUI_MARKER=block   draw charts with half-block glyphs instead of braille,
+                        for fonts that have no braille (some Windows consoles)
+
 Everything else happens inside the app: press ? for keys, q to quit.
-Cached data lives in ~/.local/share/psxtui/psx.db
-";
+Cached data lives in {db}
+"
+    )
+}
+
+/// Put the Windows console into UTF-8.
+///
+/// A console left on a regional code page renders every box-drawing and braille
+/// glyph as mojibake. Output only: crossterm reads input through the wide-char
+/// API, so the input code page buys nothing and changing it could surprise
+/// whatever runs in the same console afterwards.
+#[cfg(windows)]
+fn use_utf8_console() {
+    const CP_UTF8: u32 = 65001;
+    // SAFETY: a plain console-attribute setter with no memory involved; it
+    // fails harmlessly (returning 0) when there is no console attached.
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleOutputCP(CP_UTF8);
+    }
+}
+
+#[cfg(not(windows))]
+fn use_utf8_console() {}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use_utf8_console();
+
     // Anything on PATH is expected to answer --version and --help without
     // seizing the terminal, not least so an installer can verify itself.
     if let Some(arg) = std::env::args().nth(1) {
@@ -48,11 +84,11 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             "-h" | "--help" => {
-                print!("{USAGE}");
+                print!("{}", usage());
                 return Ok(());
             }
             other => {
-                eprint!("psxtui: unknown option '{other}'\n\n{USAGE}");
+                eprint!("psxtui: unknown option '{other}'\n\n{}", usage());
                 std::process::exit(2);
             }
         }

@@ -58,8 +58,19 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/psxtui.exe" "dist/$name/"
           Copy-Item README.md "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
-          (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash |
-            Out-File "dist/$name.zip.sha256" -Encoding ascii
+
+          # Also ship the bare .exe. The zip is what install.ps1 fetches, but a
+          # person browsing the releases page wants one file to click, not an
+          # archive holding a copy of the README they are already reading.
+          Copy-Item "dist/$name/psxtui.exe" "dist/$name.exe"
+
+          foreach ($f in "dist/$name.zip", "dist/$name.exe") {
+            # Lowercase, two spaces, filename: the format `sha256sum -c` reads.
+            # Get-FileHash's bare uppercase hash is checkable by nothing.
+            $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            "$h  $(Split-Path $f -Leaf)" |
+              Out-File "$f.sha256" -Encoding ascii -NoNewline
+          }
 
       - uses: actions/upload-artifact@v5
         with:
@@ -67,6 +78,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.exe
             dist/*.sha256
 
   publish:
@@ -85,6 +97,8 @@ jobs:
           body: |
             Prebuilt binaries — no Rust toolchain needed.
 
-            **Windows:** download the `x86_64-pc-windows-msvc.zip`, or run
-            `./install.ps1` from a clone. Use Windows Terminal.
+            **Windows:** download the `x86_64-pc-windows-msvc.exe`, rename it to
+            `psxtui.exe` and run it from Windows Terminal — or run `./install.ps1`
+            from a clone to have it placed on your PATH. The `.zip` holds the same
+            binary plus the README, and is what the installer fetches.
             **Linux / macOS:** download the matching `.tar.gz`, or run `./install.sh`.

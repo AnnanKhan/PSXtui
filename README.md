@@ -86,9 +86,16 @@ cd PSXtui
 psxtui
 ```
 
-Or skip the clone entirely: download `psxtui-<version>-x86_64-pc-windows-msvc.zip`
-from the [releases page](https://github.com/AnnanKhan/PSXtui/releases) and put the
-`.exe` wherever you keep such things.
+Or skip the clone entirely: download `psxtui-<version>-x86_64-pc-windows-msvc.exe`
+from the [releases page](https://github.com/AnnanKhan/PSXtui/releases), rename it to
+`psxtui.exe`, and put it wherever you keep such things. It is a single
+self-contained binary — SQLite is compiled in and there is nothing to install
+alongside it. The `.zip` beside it holds the same binary plus this README, and is
+what `install.ps1` downloads.
+
+Windows will warn that the binary is unsigned the first time you run it — there is
+no code-signing certificate behind this project. The `.sha256` file next to each
+download lets you confirm you got what CI built.
 
 | Flag | Effect |
 |------|--------|
@@ -334,8 +341,10 @@ They show live PSX data from the session they were captured in.
 CI (`.github/workflows/ci.yml`) runs the tests on Linux, macOS **and Windows** —
 development happens on Linux, so the Windows job is the only thing keeping that
 support honest. `release.yml` builds the prebuilt binaries for every platform on
-a `v*` tag; its Windows archive name is a contract with `install.ps1`, which
-looks for an asset ending in `x86_64-pc-windows-msvc.zip`.
+a `v*` tag. It publishes the Windows build twice — a bare `.exe` for anyone
+downloading by hand, and a `.zip` whose name is a contract with `install.ps1`,
+which looks for an asset ending in `x86_64-pc-windows-msvc.zip`. Keep the two in
+step if either is renamed.
 
 ## Notes
 

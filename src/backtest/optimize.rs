@@ -503,6 +503,7 @@ exit = "close < a"
             avg_bars_held: 0.0,
             exposure_pct: 0.0,
             intrabar_warning: false,
+            true_range_pct: None,
             bar_count: 0,
         };
         assert_eq!(Objective::Sharpe.score(&never), f64::NEG_INFINITY);

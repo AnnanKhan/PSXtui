@@ -325,6 +325,59 @@ impl Store {
         Ok(self.get_meta(&format!("historical:{day}"))?.is_some())
     }
 
+    /// Whether a day is known to have traded, judged by the EOD series.
+    ///
+    /// This is the check that tells a public holiday apart from a throttled
+    /// request: `/historical` answers both with the same empty table, but the
+    /// EOD feed only ever carries a close for a session that actually happened.
+    /// A day with bars is a trading day, full stop.
+    pub fn day_traded(&self, day: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM bars WHERE day = ?1",
+            params![day],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// How many of a symbol's bars carry true intraday high/low.
+    ///
+    /// Returns `(with_true_range, total)` over the whole cached series.
+    /// Anything the `/historical` snapshot has not reached still has its
+    /// high/low derived from open and close.
+    pub fn hl_coverage(&self, symbol: &str) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let (known, total): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(hl_known), 0), COUNT(*) FROM bars WHERE symbol = ?1",
+            params![symbol],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((known as usize, total as usize))
+    }
+
+    /// Every day the EOD series says traded but that has no `/historical`
+    /// snapshot yet, newest first.
+    ///
+    /// This drives the deep backfill, and it is derived from the bars already
+    /// cached rather than from a calendar. That matters twice over: holidays
+    /// never appear, so they are never requested and can never be mistaken for
+    /// a throttled response — and the work is bounded by history actually held
+    /// rather than by a date range guessed at.
+    pub fn days_missing_true_range(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT b.day FROM bars b
+             LEFT JOIN meta m ON m.key = 'historical:' || b.day
+             WHERE m.key IS NULL
+             ORDER BY b.day DESC",
+        )?;
+        let days = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(days)
+    }
+
     /// Trading days, newest first, that still need a `/historical` backfill.
     ///
     /// Weekends are skipped outright; public holidays surface as empty
@@ -532,6 +585,81 @@ mod tests {
             close: c,
             volume: v,
         }
+    }
+
+    // -- true-range coverage ------------------------------------------------
+
+    #[test]
+    fn day_traded_follows_the_eod_series_not_the_calendar() {
+        // This is what tells a public holiday apart from a throttled request:
+        // `/historical` answers both with an empty table, but the EOD feed
+        // only carries a close for a session that happened.
+        let s = Store::open_in_memory().unwrap();
+        s.put_eod_bars(
+            "OGDC",
+            &[bar(day_close_ts("2024-03-12"), 1.0, 1.0, 1.0, 1.0, 10.0)],
+        )
+        .unwrap();
+
+        assert!(s.day_traded("2024-03-12").unwrap());
+        assert!(!s.day_traded("2024-03-13").unwrap());
+    }
+
+    #[test]
+    fn hl_coverage_counts_only_snapshot_backed_bars() {
+        let s = Store::open_in_memory().unwrap();
+        s.put_eod_bars(
+            "OGDC",
+            &[
+                bar(day_close_ts("2024-03-11"), 1.0, 1.0, 1.0, 1.0, 10.0),
+                bar(day_close_ts("2024-03-12"), 1.0, 1.0, 1.0, 1.0, 10.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.hl_coverage("OGDC").unwrap(), (0, 2));
+
+        // A snapshot upgrades one of them to a true intraday range.
+        s.put_historical("2024-03-12", &[hist("OGDC", 1.0, 1.5, 0.5, 1.2, 10.0)])
+            .unwrap();
+        assert_eq!(s.hl_coverage("OGDC").unwrap(), (1, 2));
+    }
+
+    #[test]
+    fn days_missing_true_range_lists_traded_days_without_a_snapshot() {
+        let s = Store::open_in_memory().unwrap();
+        s.put_eod_bars(
+            "OGDC",
+            &[
+                bar(day_close_ts("2024-03-11"), 1.0, 1.0, 1.0, 1.0, 10.0),
+                bar(day_close_ts("2024-03-12"), 1.0, 1.0, 1.0, 1.0, 10.0),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            s.days_missing_true_range().unwrap(),
+            vec!["2024-03-12".to_string(), "2024-03-11".to_string()]
+        );
+
+        s.put_historical("2024-03-12", &[hist("OGDC", 1.0, 1.5, 0.5, 1.2, 10.0)])
+            .unwrap();
+        assert_eq!(
+            s.days_missing_true_range().unwrap(),
+            vec!["2024-03-11".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_day_marked_empty_is_never_relisted() {
+        // Holidays are recorded once and then stay out of the work queue.
+        let s = Store::open_in_memory().unwrap();
+        s.put_eod_bars(
+            "OGDC",
+            &[bar(day_close_ts("2024-03-11"), 1.0, 1.0, 1.0, 1.0, 10.0)],
+        )
+        .unwrap();
+        s.mark_historical_empty("2024-03-11").unwrap();
+        assert!(s.days_missing_true_range().unwrap().is_empty());
     }
 
     fn hist(symbol: &str, o: f64, h: f64, l: f64, c: f64, v: f64) -> HistoricalRow {

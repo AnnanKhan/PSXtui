@@ -26,7 +26,25 @@ const COMPANY_TTL_DAYS: i64 = 1;
 
 /// Calendar days of true-OHLC history to backfill on first run. ~3 months of
 /// trading days, enough to warm up every indicator the app computes.
+///
+/// The rest of the history is fetched on demand — see
+/// [`Worker::deep_backfill`], which the Backtest screen triggers, because that
+/// is where a synthetic high or low actually changes an answer.
 pub const BACKFILL_DAYS: i64 = 120;
+
+/// Minimum gap between `/historical` requests.
+///
+/// The client's global gap is tuned for the small JSON feeds. `/historical`
+/// returns the whole market in one ~350KB table and is throttled far harder:
+/// measured against the live portal, a 350ms gap had five of eight requests
+/// answered with an empty table, 700ms had none. A second buys margin for
+/// jitter and for the ordinary requests sharing the same limiter.
+///
+/// This matters more than a slow backfill would suggest. A throttled response
+/// is byte-identical to a public holiday — same 200, same empty table — so
+/// requesting too fast does not fail loudly, it silently mislabels trading
+/// days as holidays.
+const HISTORICAL_GAP: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Cheap to clone — the client and store are shared, so a clone runs against
 /// the same rate limiter and the same cache.
@@ -117,6 +135,9 @@ impl Worker {
                     // Hand off rather than block this queue.
                     tokio::spawn(self.clone().run_backfill(days));
                 }
+                DataRequest::DeepBackfill => {
+                    tokio::spawn(self.clone().run_deep_backfill());
+                }
                 DataRequest::RefreshExternal => self.refresh_external().await,
             }
         }
@@ -125,6 +146,23 @@ impl Worker {
     /// Run the OHLC backfill on a dedicated task.
     pub async fn run_backfill(self, days: i64) {
         self.backfill(days).await;
+        self.emit(DataEvent::BackfillDone);
+    }
+
+    /// Fill in true high/low for every cached session still missing it.
+    pub async fn run_deep_backfill(self) {
+        let days = self.store.days_missing_true_range().unwrap_or_default();
+        if days.is_empty() {
+            self.status("Every cached session already has true intraday range");
+            self.emit(DataEvent::BackfillDone);
+            return;
+        }
+        self.status(format!(
+            "Backfilling true high/low for {} sessions — about {} minutes",
+            days.len(),
+            (days.len() as u64 * HISTORICAL_GAP.as_secs() / 60).max(1)
+        ));
+        self.fetch_snapshots(&days).await;
         self.emit(DataEvent::BackfillDone);
     }
 
@@ -322,9 +360,30 @@ impl Worker {
         if missing.is_empty() {
             return;
         }
-
         let total = missing.len();
-        for (i, day) in missing.iter().enumerate() {
+        self.fetch_snapshots(&missing).await;
+
+        let count = self.store.bar_count().unwrap_or(0);
+        self.status(format!(
+            "Backfill complete — {count} daily bars across {total} sessions cached"
+        ));
+    }
+
+    /// Fetch `/historical` for each day, oldest work first, reporting progress.
+    ///
+    /// Shared by the first-run backfill and the deep one. Two rules hold here
+    /// and both exist because a throttled response and a public holiday are
+    /// indistinguishable — same 200, same empty table:
+    ///
+    /// 1. Requests are spaced by [`HISTORICAL_GAP`], well beyond what the
+    ///    portal tolerated in testing.
+    /// 2. An empty answer is only recorded as a holiday when the EOD series
+    ///    agrees the day never traded. Otherwise it is left untouched, so the
+    ///    next run retries it instead of the cache carrying a permanent lie.
+    async fn fetch_snapshots(&self, days: &[String]) {
+        let total = days.len();
+
+        for (i, day) in days.iter().enumerate() {
             // Announce the day *before* fetching it, so the bar reflects what
             // is happening now rather than what already finished.
             self.emit(DataEvent::Backfill(BackfillProgress {
@@ -336,8 +395,12 @@ impl Worker {
 
             match psx::historical(&self.client, day).await {
                 Ok(rows) if rows.is_empty() => {
-                    // A holiday: record it so it is never refetched.
-                    let _ = self.store.mark_historical_empty(day);
+                    // The EOD series is the arbiter: it only ever carries a
+                    // close for a session that happened.
+                    let traded = self.store.day_traded(day).unwrap_or(false);
+                    if !traded {
+                        let _ = self.store.mark_historical_empty(day);
+                    }
                     self.emit(DataEvent::Backfill(BackfillProgress {
                         done: i + 1,
                         total,
@@ -362,11 +425,10 @@ impl Worker {
                     return;
                 }
             }
-        }
 
-        let count = self.store.bar_count().unwrap_or(0);
-        self.status(format!(
-            "Backfill complete — {count} daily bars across {total} sessions cached"
-        ));
+            if i + 1 < total {
+                tokio::time::sleep(HISTORICAL_GAP).await;
+            }
+        }
     }
 }

@@ -95,9 +95,17 @@ pub struct Report {
     /// Share of bars spent holding a position.
     pub exposure_pct: f64,
 
-    /// Set when the strategy reads high/low, which are synthetic on most of
-    /// the history. The UI must show this next to the numbers.
+    /// Set when the strategy reads high/low, which are synthetic wherever the
+    /// `/historical` snapshot has not reached. The UI must show this next to
+    /// the numbers.
     pub intrabar_warning: bool,
+    /// Share of the tested bars that carry a *true* intraday high and low,
+    /// once known. Filled in by the caller, which is what can see the cache.
+    ///
+    /// Turns a blanket "this might be synthetic" into a number, and reads
+    /// 100% once the deep backfill has run — at which point the caveat
+    /// disappears rather than nagging forever.
+    pub true_range_pct: Option<f64>,
     /// Bars the run covered — small samples make every other number noise.
     pub bar_count: usize,
 }
@@ -189,6 +197,7 @@ impl Report {
                 held_bars as f64 / bars.len() as f64 * 100.0
             },
             intrabar_warning: strategy.uses_intrabar_range(),
+            true_range_pct: None,
             bar_count: bars.len(),
             trades,
         }
@@ -206,9 +215,17 @@ impl Report {
         // First, because it is a statement about the data rather than about
         // the result — it holds even when the strategy never fired.
         if self.intrabar_warning {
-            out.push(
-                "Uses high/low, which PSX's long-run feed does not carry — those are derived from open/close outside the recent snapshot window.".into(),
-            );
+            match self.true_range_pct {
+                // Fully backfilled: the strategy reads high/low and they are
+                // all real, so there is nothing to warn about.
+                Some(p) if p >= 99.5 => {}
+                Some(p) => out.push(format!(
+                    "Uses high/low, but only {p:.0}% of these bars have a true intraday range — the rest are derived from open/close. Press O to fetch the real ones."
+                )),
+                None => out.push(
+                    "Uses high/low, which PSX's long-run feed does not carry — those are derived from open/close wherever the snapshot backfill has not reached.".into(),
+                ),
+            }
         }
 
         if self.trade_count == 0 {
@@ -356,6 +373,34 @@ exit = "false"
         let r = engine::run(&s, &bars, &s.defaults(), &cfg()).unwrap();
         assert!(
             r.caveats().iter().any(|c| c.contains("Buy-and-hold")),
+            "{:?}",
+            r.caveats()
+        );
+    }
+
+    #[test]
+    fn a_fully_backfilled_series_drops_the_intrabar_caveat() {
+        // Once every bar has a real high and low there is nothing to warn
+        // about, and a caveat that never goes away is one nobody reads.
+        let s = Strategy::parse(
+            r#"
+name = "Ranger"
+[rules]
+entry = "close > low"
+exit = "close < high"
+"#,
+        )
+        .unwrap();
+        let bars = bars_from(&[100.0, 110.0, 120.0]);
+        let mut r = engine::run(&s, &bars, &s.defaults(), &cfg()).unwrap();
+
+        r.true_range_pct = Some(100.0);
+        assert!(!r.caveats().iter().any(|c| c.contains("high/low")));
+
+        // Partial coverage says how partial, rather than hedging vaguely.
+        r.true_range_pct = Some(16.0);
+        assert!(
+            r.caveats().iter().any(|c| c.contains("16%")),
             "{:?}",
             r.caveats()
         );

@@ -468,6 +468,7 @@ fn draw_help(f: &mut Frame) {
         bind("u", "run across the market"),
         bind("o", "cycle what a sweep ranks by"),
         bind("i / R", "install bundled strategies / reload from disk"),
+        bind("O", "fetch true intraday high/low for the whole history"),
         Line::raw(""),
         Line::from(Span::styled(
             "    Data: Pakistan Stock Exchange (dps.psx.com.pk)",

@@ -296,6 +296,34 @@ Optional top-level keys: `direction = "short"`, `stop_loss_pct`,
 the parameter sweep, walk-forward folds, and a scan of the strategy across the
 market's most liquid 150 symbols.
 
+### True intraday range
+
+PSX's long-run EOD feed carries close, volume and open — **no high or low**. A
+fresh install therefore has real intraday extremes only for the ~120 days the
+first-run backfill covers; everywhere else `high` and `low` are derived from
+open and close. Anything reading them — ATR, Stochastic, ADX, Donchian, an
+intrabar stop — is working from a range that was never traded.
+
+The daily `/historical` snapshot does carry true OHLC, and one request covers
+the **entire market** for a day, back to at least 2013. So the gap is fixable:
+press `O` on the Backtest screen and psxtui fetches a snapshot per cached
+session, roughly a second each. About 20 minutes for five years, in the
+background, once. Coverage is then reported as a number beside any strategy
+that depends on it, and the caveat disappears at 100%.
+
+Two details that are not obvious and cost real accuracy if ignored:
+
+- **`/historical` throttles harder than the rest of the portal**, and a
+  throttled response is byte-identical to a public holiday — HTTP 200, same
+  empty table. Measured against the live site, a 350ms gap had five of eight
+  requests answered with an empty table; 700ms had none. psxtui spaces these
+  requests a second apart for margin.
+- **An empty answer is therefore never trusted on its own.** A day is recorded
+  as a holiday only when the EOD series agrees it never traded — the EOD feed
+  only carries a close for a session that actually happened. Otherwise the day
+  is left alone and retried, so a throttled request can never permanently
+  mislabel a trading day.
+
 ### What it will not pretend
 
 Backtests are easy to make lie, so this one is built to argue with you.
@@ -307,11 +335,9 @@ Backtests are easy to make lie, so this one is built to argue with you.
 - **Costs are charged by default** (10bp commission + 5bp slippage, shown in the
   parameter panel). A frictionless backtest flatters everything, and flatters
   strategies that trade often most.
-- **No intrabar fills.** PSX's long-run feed carries close, volume and open —
-  *no high or low*. Outside the recent ~120-day snapshot window those columns
-  are derived from open/close, so a stop that triggered intrabar would fill at a
-  price that never traded. Stops are evaluated at the close, and any strategy
-  reading high/low says so in its results.
+- **No intrabar fills.** Stops are evaluated at the close, never against a
+  bar's high or low. See [true intraday range](#true-intraday-range) for why,
+  and how to fix it.
 - **Buy-and-hold is always on the chart.** A strategy that trails it cost money
   to run.
 - **Thin or implausible results are flagged** — fewer than ten trades, or a

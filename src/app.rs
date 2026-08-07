@@ -58,6 +58,12 @@ pub enum DataRequest {
     LoadCompany(String),
     /// Backfill true-OHLC daily snapshots for the last N calendar days.
     Backfill(i64),
+    /// Backfill true OHLC for *every* cached session that still lacks it.
+    ///
+    /// One request per trading day covers the whole market, so this is how the
+    /// backtester gets real intraday highs and lows across the full history
+    /// rather than only the recent window.
+    DeepBackfill,
     /// Refresh external market context: commodities/FX, headlines, policy rate.
     RefreshExternal,
 }
@@ -2463,7 +2469,15 @@ impl App {
         let params = self.backtest.params.clone();
         let config = self.backtest.config;
         match backtest::engine::run(strategy, &self.bars, &params, &config) {
-            Ok(report) => {
+            Ok(mut report) => {
+                // Only the app can see the cache, so the honesty about
+                // synthetic high/low is attached here rather than guessed at
+                // inside the engine.
+                if let Ok((known, total)) = self.store.hl_coverage(&self.selected)
+                    && total > 0
+                {
+                    report.true_range_pct = Some(known as f64 / total as f64 * 100.0);
+                }
                 self.status = format!(
                     "{}: {} over {} trades",
                     report.strategy_name,
@@ -2662,6 +2676,23 @@ impl App {
 
             KeyCode::Char('v') => self.backtest.cycle_view(1),
             KeyCode::Char('V') => self.backtest.cycle_view(-1),
+
+            // The fix for synthetic high/low, offered where it matters: this
+            // screen is the only place a missing intraday range changes an
+            // answer.
+            KeyCode::Char('O') => {
+                let missing = self.store.days_missing_true_range().unwrap_or_default();
+                if missing.is_empty() {
+                    self.status = "Every cached session already has true high/low".into();
+                } else {
+                    self.status = format!(
+                        "Fetching true high/low for {} sessions (~{} min) — it runs in the background",
+                        missing.len(),
+                        (missing.len() / 60).max(1)
+                    );
+                    self.request(DataRequest::DeepBackfill);
+                }
+            }
 
             KeyCode::Char('i') => match backtest::install_builtins() {
                 Ok(0) => {

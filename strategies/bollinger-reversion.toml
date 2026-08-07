@@ -1,0 +1,18 @@
+name = "Bollinger Reversion"
+about = "Buy when price closes below the lower band, sell when it returns to the middle band. Mean reversion in its plainest form; it fails badly in a sustained downtrend, where price can ride the lower band for weeks."
+source = "John Bollinger's bands; the lower-band-to-middle reversion is a standard published application."
+direction = "long"
+# The band alone gives no protection when a scrip simply keeps falling.
+stop_loss_pct = 8
+
+[params]
+period = { default = 20, min = 10, max = 50, step = 1, about = "Band period" }
+width = { default = 2, min = 1, max = 3, step = 0.25, about = "Standard deviations" }
+
+[indicators]
+lower = "bb_lower(close, period, width)"
+mid = "bb_mid(close, period, width)"
+
+[rules]
+entry = "close < lower"
+exit = "close > mid"

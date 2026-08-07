@@ -5,6 +5,8 @@
 //! post [`DataRequest`]s to a background worker and receive [`DataEvent`]s
 //! back, so the interface stays responsive while PSX is slow.
 
+pub mod backtest_state;
+
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -14,10 +16,12 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::backtest;
 use crate::cache::Store;
 use crate::ext::{Headline, MacroRates, MacroSeries};
 use crate::model::{Bar, Company, Index, Quote, SymbolInfo, Tick};
 use crate::ui::hit::{HitMap, Target, Toggle, Zone};
+use backtest_state::{BacktestState, Focus as BtFocus, View as BtView};
 
 /// The benchmark every risk statistic is measured against.
 pub const BENCHMARK: &str = "KSE100";
@@ -127,10 +131,11 @@ pub enum Screen {
     Compare,
     Seasonality,
     Macro,
+    Backtest,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 9] = [
+    pub const ALL: [Screen; 10] = [
         Screen::Dashboard,
         Screen::Screener,
         Screen::Chart,
@@ -140,6 +145,7 @@ impl Screen {
         Screen::Compare,
         Screen::Seasonality,
         Screen::Macro,
+        Screen::Backtest,
     ];
 
     pub fn title(&self) -> &'static str {
@@ -153,6 +159,7 @@ impl Screen {
             Screen::Compare => "Compare",
             Screen::Seasonality => "Seasonality",
             Screen::Macro => "Macro",
+            Screen::Backtest => "Backtest",
         }
     }
 
@@ -758,6 +765,7 @@ pub struct App {
     pub mouse_enabled: bool,
     pub chart: ChartState,
     pub compare: CompareState,
+    pub backtest: BacktestState,
     pub company_tab: CompanyTab,
     pub announcement_cursor: usize,
 
@@ -834,6 +842,7 @@ impl App {
             mouse_enabled: true,
             chart: ChartState::default(),
             compare: CompareState::default(),
+            backtest: BacktestState::default(),
             company_tab: CompanyTab::Profile,
             announcement_cursor: 0,
             macro_series: Vec::new(),
@@ -1461,7 +1470,14 @@ impl App {
             KeyCode::Char(c @ '1'..='9') => {
                 let idx = c as usize - '1' as usize;
                 if let Some(screen) = Screen::ALL.get(idx) {
-                    self.screen = *screen;
+                    self.goto_screen(*screen);
+                }
+            }
+            // The tenth screen, following the convention every tabbed terminal
+            // app uses for it.
+            KeyCode::Char('0') => {
+                if let Some(screen) = Screen::ALL.get(9) {
+                    self.goto_screen(*screen);
                 }
             }
 
@@ -1534,7 +1550,7 @@ impl App {
         match target {
             Target::Tab(i) => {
                 if let Some(screen) = Screen::ALL.get(i) {
-                    self.screen = *screen;
+                    self.goto_screen(*screen);
                 }
             }
 
@@ -1793,7 +1809,19 @@ impl App {
     fn cycle_screen(&mut self, delta: isize) {
         let n = Screen::ALL.len() as isize;
         let i = (self.screen.index() as isize + delta).rem_euclid(n);
-        self.screen = Screen::ALL[i as usize];
+        self.goto_screen(Screen::ALL[i as usize]);
+    }
+
+    /// Switch screens, doing any one-off setup the destination needs.
+    ///
+    /// Every switch path goes through here — number keys, Tab, and a click on
+    /// the tab bar — so the Backtest screen cannot be reached with an empty
+    /// strategy list just because the user arrived by an unusual route.
+    pub fn goto_screen(&mut self, screen: Screen) {
+        self.screen = screen;
+        if screen == Screen::Backtest {
+            self.backtest_init();
+        }
     }
 
     fn on_screen_key(&mut self, key: KeyEvent) {
@@ -1804,6 +1832,7 @@ impl App {
             Screen::Company => self.on_company_key(key),
             Screen::Macro => self.on_macro_key(key),
             Screen::Compare => self.on_compare_key(key),
+            Screen::Backtest => self.on_backtest_key(key),
             Screen::Analysis | Screen::Intraday | Screen::Seasonality => {}
         }
     }
@@ -2393,6 +2422,283 @@ impl App {
             _ => {}
         }
     }
+
+    // --- backtest ---------------------------------------------------------
+
+    /// Load the strategy directory, installing the bundled strategies the
+    /// first time so the screen is never empty on a fresh install.
+    pub fn backtest_init(&mut self) {
+        if !self.backtest.strategies.is_empty() {
+            return;
+        }
+        if let Err(e) = backtest::install_builtins() {
+            self.backtest
+                .load_errors
+                .push(format!("installing bundled strategies: {e:#}"));
+        }
+        self.backtest.reload();
+    }
+
+    /// Run the selected strategy on the selected symbol.
+    ///
+    /// Synchronous on purpose: a run over five years of daily bars takes
+    /// microseconds, so pushing it onto the worker would add latency and a
+    /// stale-result problem in exchange for nothing.
+    pub fn backtest_run(&mut self) {
+        self.backtest.error = None;
+
+        let Some(strategy) = self.backtest.strategy() else {
+            self.status = "No strategy selected".into();
+            return;
+        };
+        if self.bars.len() < 30 {
+            self.backtest.error = Some(format!(
+                "Only {} bars cached for {} — too few to backtest.",
+                self.bars.len(),
+                self.selected
+            ));
+            return;
+        }
+
+        let params = self.backtest.params.clone();
+        let config = self.backtest.config;
+        match backtest::engine::run(strategy, &self.bars, &params, &config) {
+            Ok(report) => {
+                self.status = format!(
+                    "{}: {} over {} trades",
+                    report.strategy_name,
+                    crate::ui::theme::pct(report.total_return_pct),
+                    report.trade_count
+                );
+                self.backtest.report = Some(report);
+                self.backtest.report_symbol = self.selected.clone();
+                self.backtest.trades_offset = 0;
+                // Sweep, walk-forward and scan were all invalidated by
+                // whatever prompted this run, so leaving the user on one of
+                // them would answer their Enter with an empty panel.
+                if !matches!(self.backtest.view, BtView::Equity | BtView::Trades) {
+                    self.backtest.view = BtView::Equity;
+                }
+            }
+            Err(e) => self.backtest.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Sweep every parameter combination.
+    fn backtest_sweep(&mut self) {
+        let Some(strategy) = self.backtest.strategy() else {
+            return;
+        };
+        if self.bars.len() < 60 {
+            self.backtest.error = Some("Not enough history to sweep.".into());
+            return;
+        }
+        let config = self.backtest.config;
+        let objective = self.backtest.objective;
+        match backtest::optimize::sweep(strategy, &self.bars, &config, objective) {
+            Ok(points) => {
+                self.status = format!("Swept {} parameter sets", points.len());
+                self.backtest.sweep = points;
+                self.backtest.sweep_offset = 0;
+                self.backtest.view = BtView::Sweep;
+            }
+            Err(e) => self.backtest.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Adopt the best parameters from the sweep.
+    ///
+    /// Deliberately a separate, explicit key rather than something the sweep
+    /// does for you: taking the top row *is* curve fitting, and it should be a
+    /// decision the user makes knowingly.
+    fn backtest_take_best(&mut self) {
+        let Some(best) = self.backtest.sweep.first().cloned() else {
+            self.status = "Run a sweep first (s)".into();
+            return;
+        };
+        self.backtest.params = best.params;
+        self.backtest.report = None;
+        self.status = "Adopted the best swept parameters — verify with w".into();
+        self.backtest_run();
+    }
+
+    /// Walk the strategy forward through history.
+    fn backtest_walk_forward(&mut self) {
+        let Some(strategy) = self.backtest.strategy() else {
+            return;
+        };
+        let config = self.backtest.config;
+        let objective = self.backtest.objective;
+        match backtest::optimize::walk_forward(strategy, &self.bars, &config, objective, 4) {
+            Ok(wf) => {
+                self.status = format!("Walk-forward: {}", wf.verdict());
+                self.backtest.walk_forward = Some(wf);
+                self.backtest.view = BtView::WalkForward;
+            }
+            Err(e) => self.backtest.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Run the strategy across the most liquid symbols.
+    fn backtest_scan(&mut self) {
+        let Some(strategy) = self.backtest.strategy() else {
+            return;
+        };
+        let strategy = strategy.clone();
+        let params = self.backtest.params.clone();
+        let config = self.backtest.config;
+
+        // Most liquid first: a strategy's behaviour on an untradeable scrip
+        // that prints twice a month is noise, and scanning all 1,100 symbols
+        // would stall the frame.
+        let mut ranked: Vec<&Quote> = self.quotes.iter().collect();
+        ranked.sort_by(|a, b| {
+            b.turnover()
+                .partial_cmp(&a.turnover())
+                .unwrap_or(Ordering::Equal)
+        });
+        let symbols: Vec<String> = ranked
+            .iter()
+            .take(backtest_state::SCAN_LIMIT)
+            .map(|q| q.symbol.clone())
+            .collect();
+
+        if symbols.is_empty() {
+            self.backtest.error = Some("No symbols loaded yet — wait for the board.".into());
+            return;
+        }
+
+        let store = self.store.clone();
+        let rows = backtest::optimize::scan(&strategy, &params, &symbols, &config, |sym| {
+            store.bars(sym, None).ok().filter(|b| !b.is_empty())
+        });
+
+        self.backtest.scan_summary = backtest::optimize::summarize(&rows);
+        self.status = format!(
+            "Scanned {} symbols; {} profitable",
+            self.backtest.scan_summary.symbols, self.backtest.scan_summary.profitable
+        );
+        self.backtest.scan = rows;
+        self.backtest.scan_offset = 0;
+        self.backtest.view = BtView::Scan;
+    }
+
+    /// Scroll whichever result list is on screen.
+    fn backtest_scroll(&mut self, delta: isize) {
+        let bt = &mut self.backtest;
+        let (offset, len) = match bt.view {
+            BtView::Trades => (
+                &mut bt.trades_offset,
+                bt.report.as_ref().map(|r| r.trades.len()).unwrap_or(0),
+            ),
+            BtView::Sweep => (&mut bt.sweep_offset, bt.sweep.len()),
+            BtView::Scan => (&mut bt.scan_offset, bt.scan.len()),
+            _ => return,
+        };
+        let max = len.saturating_sub(1);
+        *offset = (*offset as isize + delta).clamp(0, max as isize) as usize;
+    }
+
+    fn on_backtest_key(&mut self, key: KeyEvent) {
+        match key.code {
+            // Panel focus, so the arrow keys mean one thing at a time.
+            // `f`, not Tab: Tab is bound globally to the next screen, and a
+            // screen-local override would break that everywhere else.
+            KeyCode::Char('f') => {
+                self.backtest.focus = match self.backtest.focus {
+                    BtFocus::Strategies => BtFocus::Params,
+                    BtFocus::Params => BtFocus::Strategies,
+                };
+            }
+
+            KeyCode::Up | KeyCode::Char('k') => match self.backtest.focus {
+                BtFocus::Strategies => {
+                    let i = self.backtest.selected.saturating_sub(1);
+                    self.backtest.select(i);
+                }
+                BtFocus::Params => {
+                    self.backtest.param_cursor = self.backtest.param_cursor.saturating_sub(1);
+                }
+            },
+            KeyCode::Down | KeyCode::Char('j') => match self.backtest.focus {
+                BtFocus::Strategies => {
+                    let i = self.backtest.selected + 1;
+                    self.backtest.select(i);
+                }
+                BtFocus::Params => {
+                    let n = self
+                        .backtest
+                        .strategy()
+                        .map(|s| s.params.len())
+                        .unwrap_or(0);
+                    if n > 0 {
+                        self.backtest.param_cursor = (self.backtest.param_cursor + 1).min(n - 1);
+                    }
+                }
+            },
+
+            // Tweaking. Shift moves ten steps, for a param with a wide range.
+            KeyCode::Left | KeyCode::Char('-') => self.backtest.nudge_param(-1.0),
+            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.backtest.nudge_param(1.0)
+            }
+            KeyCode::Char('H') => self.backtest.nudge_param(-10.0),
+            KeyCode::Char('L') => self.backtest.nudge_param(10.0),
+            KeyCode::Char('d') => {
+                self.backtest.reset_params();
+                self.backtest.invalidate();
+                self.status = "Parameters reset to the strategy's defaults".into();
+            }
+
+            KeyCode::Enter => self.backtest_run(),
+            KeyCode::Char('s') => self.backtest_sweep(),
+            KeyCode::Char('b') => self.backtest_take_best(),
+            KeyCode::Char('W') => self.backtest_walk_forward(),
+            KeyCode::Char('u') => self.backtest_scan(),
+            KeyCode::Char('o') => {
+                self.backtest.cycle_objective();
+                self.status = format!("Ranking by {}", self.backtest.objective.label());
+            }
+
+            KeyCode::Char('v') => self.backtest.cycle_view(1),
+            KeyCode::Char('V') => self.backtest.cycle_view(-1),
+
+            KeyCode::Char('i') => match backtest::install_builtins() {
+                Ok(0) => {
+                    self.backtest.reload();
+                    self.status = "Bundled strategies were already installed".into();
+                }
+                Ok(n) => {
+                    self.backtest.reload();
+                    self.status = format!("Installed {n} bundled strategies");
+                }
+                Err(e) => self.backtest.error = Some(format!("{e:#}")),
+            },
+            KeyCode::Char('R') => {
+                self.backtest.reload();
+                let failed = self.backtest.load_errors.len();
+                self.status = format!(
+                    "Reloaded {} strategies from {}{}",
+                    self.backtest.strategies.len(),
+                    backtest::strategy::strategy_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    // Saying how many were rejected is the difference between
+                    // "my strategy is missing" and "my strategy has a typo".
+                    if failed == 0 {
+                        String::new()
+                    } else {
+                        format!(" — {failed} rejected, see the Parameters panel")
+                    }
+                );
+            }
+
+            KeyCode::PageDown => self.backtest_scroll(10),
+            KeyCode::PageUp => self.backtest_scroll(-10),
+
+            _ => {}
+        }
+    }
 }
 
 /// Move a cursor by `delta`, clamped to `len`. Returns 0 for an empty list.
@@ -2887,9 +3193,15 @@ mod tests {
     #[test]
     fn every_screen_has_a_working_number_key() {
         // Guards the case where Screen::ALL grew but the key range didn't.
+        // Screens 1-9 take their own digit; the tenth takes '0', and an
+        // eleventh would have nowhere to go — which is what this asserts.
         let mut a = app();
+        assert!(
+            Screen::ALL.len() <= 10,
+            "more screens than digits: give the extras another binding"
+        );
         for (i, expected) in Screen::ALL.iter().enumerate() {
-            let c = char::from_digit(i as u32 + 1, 10).unwrap();
+            let c = char::from_digit(((i as u32) + 1) % 10, 10).unwrap();
             a.screen = Screen::Dashboard;
             a.on_key(key(c));
             assert_eq!(a.screen, *expected, "key '{c}' should open {expected:?}");

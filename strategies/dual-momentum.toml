@@ -1,0 +1,16 @@
+name = "Absolute Momentum"
+about = "Hold while the 12-month return is positive and price is above its 10-month average; stand aside otherwise. The absolute-momentum half of Antonacci's dual momentum — the relative half needs a cross-asset ranking this engine does not do."
+source = "Gary Antonacci, 'Dual Momentum Investing'; the 10-month trend rule follows Meb Faber's timing model."
+direction = "long"
+
+[params]
+lookback = { default = 252, min = 60, max = 300, step = 6, about = "Momentum lookback in bars (252 ≈ 12 months)" }
+trend = { default = 200, min = 50, max = 250, step = 10, about = "Trend average (200 ≈ 10 months)" }
+
+[indicators]
+mom = "pct_change(close, lookback)"
+trend_ma = "sma(close, trend)"
+
+[rules]
+entry = "mom > 0 and close > trend_ma"
+exit = "mom < 0 or close < trend_ma"

@@ -1,0 +1,18 @@
+name = "Turtle Breakout (S1)"
+about = "Buy a break above the 20-day high, exit on a break below the 10-day low. System 1 of the original Turtle rules, minus the pyramiding, ATR position sizing and the 'skip a signal after a winner' filter — those need position state this engine does not model."
+source = "Richard Dennis & William Eckhardt's Turtle system, System 1, as published in the original Turtle rules."
+direction = "long"
+
+[params]
+entry_days = { default = 20, min = 10, max = 55, step = 5, about = "Breakout lookback (S2 uses 55)" }
+exit_days = { default = 10, min = 5, max = 20, step = 1, about = "Exit lookback (S2 uses 20)" }
+
+[indicators]
+# Compared against the *previous* bar's channel: a bar's own high is part of
+# today's Donchian upper band, so comparing against it would never trigger.
+breakout = "prev(donchian_upper(entry_days), 1)"
+stop = "prev(donchian_lower(exit_days), 1)"
+
+[rules]
+entry = "close > breakout"
+exit = "close < stop"

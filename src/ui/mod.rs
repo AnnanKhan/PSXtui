@@ -2,6 +2,7 @@
 //! I/O — so a frame can be drawn at any time without side effects.
 
 pub mod analysis;
+pub mod backtest;
 pub mod chart;
 pub mod company;
 pub mod compare;
@@ -45,6 +46,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Compare => compare::draw(f, body, app),
         Screen::Seasonality => seasonality::draw(f, body, app),
         Screen::Macro => macro_::draw(f, body, app),
+        Screen::Backtest => backtest::draw(f, body, app),
     }
 
     draw_status(f, status, app);
@@ -396,7 +398,7 @@ fn draw_help(f: &mut Frame) {
         ),
         Line::raw(""),
         section("Global"),
-        bind("1 – 6", "jump to screen"),
+        bind("1 – 9, 0", "jump to screen (0 is the tenth)"),
         bind("Tab / S-Tab", "cycle screens"),
         bind("/", "search symbol, company or sector"),
         bind("r", "refresh market data"),
@@ -452,6 +454,20 @@ fn draw_help(f: &mut Frame) {
         section("Macro"),
         bind("s", "move focus between series and headlines"),
         bind("j / k, g / G", "scroll the focused panel"),
+        Line::raw(""),
+        section("Backtest"),
+        bind("f", "move focus between strategies and parameters"),
+        bind("j / k, ↑ ↓", "move within the focused panel"),
+        bind("← → , - +", "tweak the selected parameter (H / L by ten)"),
+        bind("d", "reset parameters to the strategy's defaults"),
+        bind("Enter", "run on the selected symbol"),
+        bind("v / V", "cycle the results view"),
+        bind("s", "sweep every parameter combination"),
+        bind("b", "adopt the best swept parameters"),
+        bind("W", "walk forward — the only out-of-sample number"),
+        bind("u", "run across the market"),
+        bind("o", "cycle what a sweep ranks by"),
+        bind("i / R", "install bundled strategies / reload from disk"),
         Line::raw(""),
         Line::from(Span::styled(
             "    Data: Pakistan Stock Exchange (dps.psx.com.pk)",

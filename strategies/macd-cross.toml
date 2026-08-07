@@ -1,0 +1,17 @@
+name = "MACD Signal Cross"
+about = "Buy when the MACD line crosses above its signal line, sell on the reverse. The textbook 12/26/9 momentum rule — quick to turn, and prone to whipsaw in a range."
+source = "Gerald Appel's MACD; the 12/26/9 signal-line crossover is the standard published form."
+direction = "long"
+
+[params]
+fast = { default = 12, min = 5, max = 30, step = 1, about = "Fast EMA" }
+slow = { default = 26, min = 15, max = 60, step = 1, about = "Slow EMA" }
+signal = { default = 9, min = 3, max = 20, step = 1, about = "Signal EMA" }
+
+[indicators]
+m = "macd(close, fast, slow, signal)"
+sig = "macd_signal(close, fast, slow, signal)"
+
+[rules]
+entry = "cross_above(m, sig)"
+exit = "cross_below(m, sig)"

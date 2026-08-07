@@ -21,6 +21,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Strategy files for the backtester are TOML, matching Cargo's own idiom.
+toml = "1.1.4"
 tokio = { version = "1.53.1", features = ["full"] }
 
 # A console left on a regional code page renders every box-drawing and braille

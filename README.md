@@ -19,6 +19,7 @@ return analytics, company fundamentals, and intraday microstructure.
 | 7 | **Compare** | 2-8 scrips side by side — rebased performance overlay, risk table, correlation matrix |
 | 8 | **Seasonality** | Month-by-year return grid, day-of-week effects, return distribution, streaks |
 | 9 | **Macro** | 20 external series — energy, metals, agriculture, freight, FX, crypto — plus the SBP policy rate and business news, with correlation to the selected scrip |
+| 0 | **Backtest** | Run a strategy over five years of history — equity curve against buy-and-hold, trade list, parameter sweep, walk-forward validation and a market-wide scan |
 
 Timeframes: 5D, 1M, 3M, 6M, YTD, 1Y, 2Y, 3Y, 5Y and MAX.
 
@@ -160,11 +161,11 @@ psxtui --help       # the two flags there are, plus where your data lives
 
 ### Where things live
 
-| Platform | Cache and watchlist |
-|----------|---------------------|
-| Linux | `~/.local/share/psxtui/psx.db` |
-| macOS | `~/Library/Application Support/psxtui/psx.db` |
-| Windows | `%APPDATA%\psxtui\data\psx.db` |
+| Platform | Cache and watchlist | Strategies |
+|----------|---------------------|------------|
+| Linux | `~/.local/share/psxtui/psx.db` | `~/.local/share/psxtui/strategies/` |
+| macOS | `~/Library/Application Support/psxtui/psx.db` | `~/Library/Application Support/psxtui/strategies/` |
+| Windows | `%APPDATA%\psxtui\data\psx.db` | `%APPDATA%\psxtui\data\strategies\` |
 
 `psxtui --help` prints the real path for the machine it is running on.
 
@@ -180,7 +181,7 @@ Press `?` in the app for the full list.
 
 | Key | Action |
 |-----|--------|
-| `1`–`9`, `Tab` | Switch screen |
+| `1`–`9`, `0`, `Tab` | Switch screen (`0` is the tenth) |
 | `/` | Search by symbol, company or sector |
 | `j`/`k`, `↑`/`↓` | Move cursor · `Enter` opens in the chart |
 | `s` / `S` | Cycle sort column / reverse |
@@ -192,6 +193,8 @@ Press `?` in the app for the full list.
 | `a` / `x` | Compare: add a symbol (opens the picker) / remove one · `c` resets |
 | `r` | Refresh · `q` quit |
 | `M` | Mouse on/off (off restores terminal text selection) |
+| `f` / `←` `→` | Backtest: focus strategies or parameters / tweak the selected one |
+| `Enter` / `s` / `W` / `u` | Backtest: run · sweep parameters · walk forward · scan the market |
 
 ### Mouse
 
@@ -240,6 +243,86 @@ stay separable on a dark background. The chip row wraps and the legend packs
 onto extra lines rather than hiding anything, so a full set is still readable on
 an 80-column terminal; the correlation matrix folds away when the pane is too
 narrow to hold it honestly.
+
+## Backtesting
+
+Screen `0` runs a strategy over the full cached history — about five years and
+1,250 sessions per scrip — and shows what it would have done.
+
+Strategies are TOML files in the strategies directory
+([where things live](#where-things-live)). Eight well-known ones ship with the
+binary and install themselves the first time you open the screen: Golden Cross,
+Connors RSI(2), Turtle breakout, MACD crossover, Bollinger reversion, absolute
+momentum, Wilder's ADX/DI system, and a triple-MA ribbon. Each file credits its
+source.
+
+```toml
+name = "Golden Cross"
+about = "Buy when the 50-day average crosses above the 200-day."
+
+[params]
+fast = { default = 50,  min = 10, max = 100, step = 5 }
+slow = { default = 200, min = 50, max = 300, step = 10 }
+
+[indicators]
+f = "sma(close, fast)"
+s = "sma(close, slow)"
+
+[rules]
+entry = "cross_above(f, s)"
+exit  = "cross_below(f, s)"
+```
+
+Drop a file in that directory and press `R` to import it. A file that does not
+parse is reported by name with the reason — an unknown function, a period that
+cannot be a period, a rule referencing something never declared — rather than
+silently failing to appear.
+
+`[params]` carries the bounds, and everything else follows from them: `←`/`→`
+tweaks the selected parameter, `s` sweeps every combination, and `W` optimises
+each walk-forward window. One declaration, three uses.
+
+**Expressions.** Columns `close`, `open`, `high`, `low`, `volume`, `typical`;
+operators `+ - * /`, `> >= < <= == !=`, `and`/`or`/`not`; and the functions
+`sma ema rsi atr obv cci williams_r macd macd_signal macd_hist bb_upper bb_mid
+bb_lower stoch_k stoch_d adx di_plus di_minus donchian_upper donchian_lower
+donchian_mid highest lowest change pct_change prev cross_above cross_below abs
+min max`. Everything is a whole aligned column, so an indicator's warm-up is
+`None` and a rule built on it is undefined rather than accidentally true.
+Optional top-level keys: `direction = "short"`, `stop_loss_pct`,
+`take_profit_pct`, `min_hold_bars`, and a `filter` rule that gates entries.
+
+**Views** (`v` cycles): equity curve against buy-and-hold, the trade list,
+the parameter sweep, walk-forward folds, and a scan of the strategy across the
+market's most liquid 150 symbols.
+
+### What it will not pretend
+
+Backtests are easy to make lie, so this one is built to argue with you.
+
+- **No look-ahead.** A signal computed from bar *i* fills at bar *i+1*'s open —
+  structurally, not by convention. There is no code path that fills at the
+  signal bar's own price, so no strategy file can ask for one. A signal on the
+  last bar never trades.
+- **Costs are charged by default** (10bp commission + 5bp slippage, shown in the
+  parameter panel). A frictionless backtest flatters everything, and flatters
+  strategies that trade often most.
+- **No intrabar fills.** PSX's long-run feed carries close, volume and open —
+  *no high or low*. Outside the recent ~120-day snapshot window those columns
+  are derived from open/close, so a stop that triggered intrabar would fill at a
+  price that never traded. Stops are evaluated at the close, and any strategy
+  reading high/low says so in its results.
+- **Buy-and-hold is always on the chart.** A strategy that trails it cost money
+  to run.
+- **Thin or implausible results are flagged** — fewer than ten trades, or a
+  Sharpe above 3, which is far more often a data artefact than an edge.
+- **Walk-forward is the real answer.** The tweak panel is a curve-fitting
+  machine by construction. `W` optimises on each training window and scores on
+  the untouched window after it; the efficiency ratio (out-of-sample ÷
+  in-sample) says how much of the tuning was real. Below ~0.3, none of it was.
+- **Survivorship is unfixable here.** PSX's symbol list holds currently-listed
+  scrips, so anything delisted is absent and every market-wide aggregate is
+  biased upward. The scan says so on screen.
 
 ## How it gets data
 
@@ -304,6 +387,11 @@ src/
   cache/      SQLite store; merges EOD and /historical into one bar series
   analysis/   indicators.rs (SMA/EMA/RSI/MACD/Bollinger/ATR/OBV/VWAP/Stochastic)
               stats.rs      (returns, volatility, Sharpe, Sortino, drawdown, beta)
+  backtest/   expr.rs     the series language strategy files are written in
+              strategy.rs the TOML schema, its validation and loading
+              engine.rs   bar-by-bar simulation; owns the look-ahead guarantee
+              report.rs   metrics, and the caveats shown beside them
+              optimize.rs sweeps, walk-forward validation, universe scans
   data.rs     background worker — owns every network call and cache write
   app.rs      all application state and key handling
   ui/         one module per screen; rendering is a pure function of `App`
@@ -317,6 +405,16 @@ Two invariants the code depends on:
 2. **No poisoned floats.** PSX data is full of thin scrips, limit-locked
    sessions and zero-volume days. No analysis function panics or returns `NaN`
    or infinity; degenerate cases collapse to documented sentinels.
+3. **Fills come after signals.** The backtest engine raises an order on one bar
+   and executes it on the next. Look-ahead bias is invisible in results, so it
+   is prevented by the shape of the loop rather than by reviewing strategy
+   files.
+
+The backtester is synchronous: a run over five years of daily bars takes
+microseconds, so a full parameter sweep fits between two frames and needs no
+background task. That is also why it can afford an event-driven engine rather
+than the vectorised shortcut Python backtesters take — the sweep and the equity
+curve are produced by the same code, so they cannot disagree.
 
 Charts aggregate bars into one candle per terminal column (first open, last
 close, extreme high/low, summed volume) rather than dropping sessions, while

@@ -1,0 +1,16 @@
+name = "Golden Cross"
+about = "Buy when the 50-day average crosses above the 200-day, sell on the reverse (the 'death cross'). The most widely quoted trend-following rule there is — slow, few trades, and it gives back a lot at every turn."
+source = "Classic technical analysis; the 50/200 pairing is the conventional form."
+direction = "long"
+
+[params]
+fast = { default = 50, min = 10, max = 100, step = 5, about = "Fast average" }
+slow = { default = 200, min = 50, max = 300, step = 10, about = "Slow average" }
+
+[indicators]
+f = "sma(close, fast)"
+s = "sma(close, slow)"
+
+[rules]
+entry = "cross_above(f, s)"
+exit = "cross_below(f, s)"

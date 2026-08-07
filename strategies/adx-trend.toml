@@ -1,0 +1,18 @@
+name = "ADX Trend Follow"
+about = "Trade the +DI/-DI crossover, but only while ADX says a trend is actually present. The ADX gate is what separates this from a plain crossover: below 25 the directional lines cross constantly and mean nothing."
+source = "J. Welles Wilder's Directional Movement System, from 'New Concepts in Technical Trading Systems' (1978)."
+direction = "long"
+
+[params]
+period = { default = 14, min = 7, max = 30, step = 1, about = "DI/ADX period" }
+threshold = { default = 25, min = 15, max = 40, step = 1, about = "Minimum ADX for a trend to count" }
+
+[indicators]
+plus = "di_plus(period)"
+minus = "di_minus(period)"
+strength = "adx(period)"
+
+[rules]
+filter = "strength > threshold"
+entry = "cross_above(plus, minus)"
+exit = "cross_below(plus, minus)"

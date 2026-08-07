@@ -1,0 +1,19 @@
+name = "Triple MA Ribbon"
+about = "Hold only while short, medium and long averages are stacked in order — an alignment filter rather than a crossover. Enters later than a two-average cross and sits out chop, at the cost of missing the start of each move."
+source = "The 4/9/18 ribbon popularised by R.C. Allen; widely reused with 10/50/200."
+direction = "long"
+
+[params]
+short = { default = 10, min = 3, max = 30, step = 1, about = "Short average" }
+medium = { default = 50, min = 20, max = 100, step = 5, about = "Medium average" }
+long = { default = 200, min = 100, max = 300, step = 10, about = "Long average" }
+
+[indicators]
+a = "sma(close, short)"
+b = "sma(close, medium)"
+c = "sma(close, long)"
+stacked = "a > b and b > c"
+
+[rules]
+entry = "stacked and not prev(stacked, 1)"
+exit = "a < b"

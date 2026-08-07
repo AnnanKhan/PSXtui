@@ -1,0 +1,22 @@
+name = "Connors RSI(2)"
+about = "Mean reversion inside an uptrend: only trade above the 200-day average, buy when the 2-period RSI collapses below 10, exit when price recovers above the 5-day average. Trades often and holds for days, so costs matter more here than in any other bundled strategy."
+source = "Larry Connors & Cesar Alvarez, 'Short Term Trading Strategies That Work'; rules as summarised by StockCharts ChartSchool."
+direction = "long"
+
+[params]
+rsi_period = { default = 2, min = 2, max = 5, step = 1, about = "RSI lookback — Connors uses 2" }
+oversold = { default = 10, min = 2, max = 30, step = 1, about = "Entry threshold; Connors found sub-5 stronger still" }
+trend = { default = 200, min = 50, max = 250, step = 10, about = "Trend filter average" }
+exit_ma = { default = 5, min = 3, max = 20, step = 1, about = "Exit average" }
+
+[indicators]
+r = "rsi(close, rsi_period)"
+trend_ma = "sma(close, trend)"
+fast_ma = "sma(close, exit_ma)"
+
+[rules]
+# The trend filter is the whole point: this is a dip-buying rule, and buying
+# dips in a downtrend is just catching a falling knife.
+filter = "close > trend_ma"
+entry = "r < oversold"
+exit = "close > fast_ma"

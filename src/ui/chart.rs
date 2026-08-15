@@ -9,10 +9,11 @@
 //! how many pixels a session gets.
 
 use ratatui::prelude::*;
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Rectangle};
+use ratatui::widgets::canvas::Canvas;
 use ratatui::widgets::{Block, Paragraph};
 
 use super::hit::{Target, Zone};
+use super::paint::{self, Paint};
 use super::{theme, widgets};
 use crate::analysis::indicators;
 use crate::app::{App, ChartStyle, Pane, Range};
@@ -97,7 +98,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     if let Some(q) = app.selected_quote() {
         top.push(Span::styled(
             theme::price(q.current),
-            Style::new().fg(theme::FG).bold(),
+            Style::new().fg(theme::fg()).bold(),
         ));
         top.push(Span::styled(
             format!(
@@ -110,7 +111,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     } else if let Some(b) = last {
         top.push(Span::styled(
             theme::price(b.close),
-            Style::new().fg(theme::FG).bold(),
+            Style::new().fg(theme::fg()).bold(),
         ));
         top.push(Span::raw("  "));
     }
@@ -134,9 +135,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     let mut ranges = vec![Span::styled(" Range ", theme::label_style())];
     for (i, r) in Range::ALL.iter().enumerate() {
         let style = if *r == app.chart.range {
-            Style::new().fg(theme::ACCENT).bold()
+            Style::new().fg(theme::accent()).bold()
         } else {
-            Style::new().fg(theme::DIM)
+            Style::new().fg(theme::dim())
         };
         let text = format!("{} ", r.label());
         let w = text.chars().count() as u16;
@@ -184,9 +185,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         ranges.push(Span::styled(
             text,
             if on {
-                Style::new().fg(theme::ACCENT)
+                Style::new().fg(theme::accent())
             } else {
-                Style::new().fg(theme::BORDER)
+                Style::new().fg(theme::border())
             },
         ));
     }
@@ -207,9 +208,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     }
     ranges.push(Span::styled(
         style_label,
-        Style::new().fg(theme::ACCENT).bold(),
+        Style::new().fg(theme::accent()).bold(),
     ));
-    ranges.push(Span::styled(" (c) ", Style::new().fg(theme::DIM)));
+    ranges.push(Span::styled(" (c) ", Style::new().fg(theme::dim())));
     ranges.push(Span::styled(
         format!(" {} sessions", bars.len()),
         theme::label_style(),
@@ -319,164 +320,212 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
 
     draw_price_axis(f, axis_area, lo, hi);
 
-    let candles_ref = candles.clone();
-    let style = app.chart.style;
-    let canvas = Canvas::default()
-        .block(Block::default())
-        // Braille for candles (sub-cell wick precision), half-blocks for the
-        // line styles (a continuous stroke instead of a dotted trail).
-        .marker(theme::marker(style.marker()))
-        .x_bounds([0.0, candles_ref.len().max(1) as f64])
-        .y_bounds([lo, hi])
-        .paint(move |ctx| {
-            // Levels first, so the candles paint over them: the price action
-            // is the subject, the level is the backdrop.
-            for level in &levels {
-                if level.price < lo || level.price > hi {
-                    continue;
-                }
-                let color = if level.is_support {
-                    theme::UP
-                } else {
-                    theme::DOWN
-                };
-                ctx.draw(&CanvasLine {
-                    x1: 0.0,
-                    y1: level.price,
-                    x2: candles_ref.len() as f64,
-                    y2: level.price,
-                    color,
-                });
-            }
-
-            match style {
-                ChartStyle::Candles => {
-                    for (i, c) in candles_ref.iter().enumerate() {
-                        let x = i as f64 + 0.5;
-                        let color = if c.close >= c.open {
-                            theme::UP
-                        } else {
-                            theme::DOWN
-                        };
-                        // Wick first so the body paints over it.
-                        ctx.draw(&CanvasLine {
-                            x1: x,
-                            y1: c.low,
-                            x2: x,
-                            y2: c.high,
-                            color,
-                        });
-                        let body_lo = c.open.min(c.close);
-                        let body_hi = c.open.max(c.close);
-                        ctx.draw(&Rectangle {
-                            x: i as f64 + 0.15,
-                            y: body_lo,
-                            width: 0.7,
-                            // A doji has zero height and would vanish entirely.
-                            height: (body_hi - body_lo).max((hi - lo) * 0.002),
-                            color,
-                        });
-                    }
-                }
-                ChartStyle::Area => {
-                    // Fill from the floor up to each close, then stroke the
-                    // top edge so the boundary stays crisp.
-                    //
-                    // Drawn as vertical strokes rather than rectangles:
-                    // canvas rectangles are outlines, not filled shapes, so a
-                    // row of them leaves a comb of gaps where the sides don't
-                    // land on adjacent cells.
-                    for (i, c) in candles_ref.iter().enumerate() {
-                        let top = c.close.max(lo);
-                        for step in 0..3 {
-                            let x = i as f64 + 0.17 + step as f64 * 0.33;
-                            ctx.draw(&CanvasLine {
-                                x1: x,
-                                y1: lo,
-                                x2: x,
-                                y2: top,
-                                color: theme::VOLUME,
-                            });
-                        }
-                    }
-                    for (i, w) in candles_ref.windows(2).enumerate() {
-                        ctx.draw(&CanvasLine {
-                            x1: i as f64 + 0.5,
-                            y1: w[0].close,
-                            x2: i as f64 + 1.5,
-                            y2: w[1].close,
-                            color: theme::ACCENT,
-                        });
-                    }
-                }
-                ChartStyle::Line | ChartStyle::Dots => {
-                    for (i, w) in candles_ref.windows(2).enumerate() {
-                        ctx.draw(&CanvasLine {
-                            x1: i as f64 + 0.5,
-                            y1: w[0].close,
-                            x2: i as f64 + 1.5,
-                            y2: w[1].close,
-                            color: theme::ACCENT,
-                        });
-                    }
-                    // A single session has no segment to draw, so mark the
-                    // point rather than rendering an empty chart.
-                    if candles_ref.len() == 1 {
-                        ctx.print(
-                            0.5,
-                            candles_ref[0].close,
-                            Span::styled("•", Style::new().fg(theme::ACCENT)),
-                        );
-                    }
-                }
-            }
-
-            for (series, color) in [(sma.as_ref(), theme::ACCENT), (ema.as_ref(), theme::WARN)] {
-                if let Some(s) = series {
-                    draw_overlay(ctx, s, color);
-                }
-            }
-            if let Some((upper, lower)) = &bb {
-                draw_overlay(ctx, upper, theme::VOLUME);
-                draw_overlay(ctx, lower, theme::VOLUME);
-            }
-            if let Some((upper, middle, lower)) = &donchian {
-                draw_overlay(ctx, upper, theme::UP);
-                draw_overlay(ctx, lower, theme::DOWN);
-                draw_overlay(ctx, middle, theme::DIM);
-            }
-            if let Some(i) = &ichimoku {
-                // A terminal canvas cannot shade the cloud, so its two edges
-                // carry the colour instead: span A above span B is a bullish
-                // cloud, below it a bearish one.
-                draw_overlay(ctx, &i.span_a, theme::UP);
-                draw_overlay(ctx, &i.span_b, theme::DOWN);
-                draw_overlay(ctx, &i.conversion, theme::ACCENT);
-                draw_overlay(ctx, &i.base, theme::WARN);
-            }
-
-            // Level labels last: a price written under a candle is unreadable,
-            // and the label is what makes the line actionable.
-            for level in &levels {
-                if level.price < lo || level.price > hi {
-                    continue;
-                }
-                let color = if level.is_support {
-                    theme::UP
-                } else {
-                    theme::DOWN
-                };
-                ctx.print(
-                    0.0,
-                    level.price,
-                    Line::styled(theme::price(level.price), Style::new().fg(color)),
-                );
-            }
-        });
+    let art = PriceArt {
+        candles: &candles,
+        style: app.chart.style,
+        sma,
+        ema,
+        bb,
+        donchian,
+        ichimoku,
+        levels: &levels,
+        lo,
+        hi,
+    };
+    let x_bounds = [0.0, candles.len().max(1) as f64];
 
     app.hits.borrow_mut().zone(area, Zone::Chart);
-    f.render_widget(canvas, plot_area);
+
+    if let Some(mut plot) = paint::begin(plot_area, x_bounds, [lo, hi]) {
+        art.paint(&mut plot);
+        paint::finish(f, "chart.price", plot_area, plot);
+    } else {
+        let canvas = Canvas::default()
+            .block(Block::default())
+            // Braille for candles (sub-cell wick precision), half-blocks for
+            // the line styles (a continuous stroke instead of a dotted trail).
+            .marker(theme::marker(art.style.marker()))
+            .x_bounds(x_bounds)
+            .y_bounds([lo, hi])
+            .paint(|ctx| art.paint(ctx));
+        f.render_widget(canvas, plot_area);
+    }
+
+    // Labels are terminal text in both paths rather than part of the picture:
+    // over an image they stay at the font's own resolution, and a price written
+    // in cells is legible where one rasterised into the plot would not be.
+    draw_level_labels(f, plot_area, &levels, lo, hi);
     draw_date_labels(f, plot_area, bars, &buckets);
+}
+
+/// One overlay, sampled to one value per drawn column. `None` where the
+/// indicator has not warmed up yet, exactly as [`sample`] returns it.
+type Series = Vec<Option<f64>>;
+
+/// Everything the price plot draws, independent of how it is drawn.
+struct PriceArt<'a> {
+    candles: &'a [Bar],
+    style: ChartStyle,
+    sma: Option<Series>,
+    ema: Option<Series>,
+    bb: Option<(Series, Series)>,
+    donchian: Option<(Series, Series, Series)>,
+    ichimoku: Option<IchimokuPlot>,
+    levels: &'a [indicators::Level],
+    lo: f64,
+    hi: f64,
+}
+
+impl PriceArt<'_> {
+    fn paint<P: Paint>(&self, p: &mut P) {
+        let (lo, hi) = (self.lo, self.hi);
+        let n = self.candles.len() as f64;
+
+        // Levels first, so the candles paint over them: the price action is
+        // the subject, the level is the backdrop.
+        for level in self.levels {
+            if level.price < lo || level.price > hi {
+                continue;
+            }
+            p.stroke(0.0, level.price, n, level.price, self.level_color(level));
+        }
+
+        match self.style {
+            ChartStyle::Candles => {
+                for (i, c) in self.candles.iter().enumerate() {
+                    let x = i as f64 + 0.5;
+                    let color = if c.close >= c.open {
+                        theme::up()
+                    } else {
+                        theme::down()
+                    };
+                    // Wick first so the body paints over it.
+                    p.stroke(x, c.low, x, c.high, color);
+                    let body_lo = c.open.min(c.close);
+                    let body_hi = c.open.max(c.close);
+                    p.fill(
+                        i as f64 + 0.15,
+                        body_lo,
+                        0.7,
+                        // A doji has zero height and would vanish entirely.
+                        (body_hi - body_lo).max((hi - lo) * 0.002),
+                        color,
+                    );
+                }
+            }
+            ChartStyle::Area => {
+                // Fill from the floor up to each close, then stroke the top
+                // edge so the boundary stays crisp.
+                for (i, c) in self.candles.iter().enumerate() {
+                    let top = c.close.max(lo);
+                    if p.is_pixel() {
+                        // Half a column either side of the close, so adjacent
+                        // fills meet with no seam between them.
+                        p.fill(i as f64, lo, 1.0, top - lo, theme::volume());
+                    } else {
+                        // A canvas rectangle is an outline, not a filled
+                        // shape, so a row of them leaves a comb of gaps where
+                        // the sides don't land on adjacent cells. Vertical
+                        // strokes fill it instead.
+                        for step in 0..3 {
+                            let x = i as f64 + 0.17 + step as f64 * 0.33;
+                            p.stroke(x, lo, x, top, theme::volume());
+                        }
+                    }
+                }
+                self.stroke_closes(p);
+            }
+            ChartStyle::Line | ChartStyle::Dots => self.stroke_closes(p),
+        }
+
+        for (series, color) in [
+            (self.sma.as_ref(), theme::accent()),
+            (self.ema.as_ref(), theme::warn()),
+        ] {
+            if let Some(s) = series {
+                draw_overlay(p, s, color);
+            }
+        }
+        if let Some((upper, lower)) = &self.bb {
+            draw_overlay(p, upper, theme::volume());
+            draw_overlay(p, lower, theme::volume());
+        }
+        if let Some((upper, middle, lower)) = &self.donchian {
+            draw_overlay(p, upper, theme::up());
+            draw_overlay(p, lower, theme::down());
+            draw_overlay(p, middle, theme::dim());
+        }
+        if let Some(i) = &self.ichimoku {
+            // Neither renderer shades the cloud, so its two edges carry the
+            // colour instead: span A above span B is a bullish cloud, below it
+            // a bearish one.
+            draw_overlay(p, &i.span_a, theme::up());
+            draw_overlay(p, &i.span_b, theme::down());
+            draw_overlay(p, &i.conversion, theme::accent());
+            draw_overlay(p, &i.base, theme::warn());
+        }
+    }
+
+    /// The close line the area and line styles share.
+    fn stroke_closes<P: Paint>(&self, p: &mut P) {
+        for (i, w) in self.candles.windows(2).enumerate() {
+            p.stroke(
+                i as f64 + 0.5,
+                w[0].close,
+                i as f64 + 1.5,
+                w[1].close,
+                theme::accent(),
+            );
+        }
+        // A single session has no segment to draw, so mark the point rather
+        // than rendering an empty chart.
+        if self.candles.len() == 1 {
+            p.point(0.5, self.candles[0].close, theme::accent());
+        }
+    }
+
+    fn level_color(&self, level: &indicators::Level) -> Color {
+        if level.is_support {
+            theme::up()
+        } else {
+            theme::down()
+        }
+    }
+}
+
+/// Price tags for the support and resistance lines, written at the left edge of
+/// the row each level falls on.
+///
+/// A line without its price is a line; with it, it is a level the user can act
+/// on — so the label is drawn even where the candles are dense, and the two
+/// simply overlap as they did when the canvas printed them.
+fn draw_level_labels(f: &mut Frame, area: Rect, levels: &[indicators::Level], lo: f64, hi: f64) {
+    if area.height == 0 || hi <= lo {
+        return;
+    }
+    for level in levels {
+        if level.price < lo || level.price > hi {
+            continue;
+        }
+        let t = (level.price - lo) / (hi - lo);
+        let row = ((1.0 - t) * (area.height - 1) as f64).round() as u16;
+        let color = if level.is_support {
+            theme::up()
+        } else {
+            theme::down()
+        };
+        let text = theme::price(level.price);
+        let width = (text.chars().count() as u16).min(area.width);
+        f.render_widget(
+            Paragraph::new(Line::styled(text, Style::new().fg(color))),
+            Rect {
+                x: area.x,
+                y: area.y + row.min(area.height - 1),
+                width,
+                height: 1,
+            },
+        );
+    }
 }
 
 /// The four Ichimoku lines the price canvas draws, already sampled per column
@@ -504,16 +553,10 @@ fn shift_forward(series: &[Option<f64>], n: usize) -> Vec<Option<f64>> {
 }
 
 /// Connect consecutive defined points of an overlay series.
-fn draw_overlay(ctx: &mut ratatui::widgets::canvas::Context, series: &[Option<f64>], color: Color) {
+fn draw_overlay<P: Paint>(p: &mut P, series: &[Option<f64>], color: Color) {
     for i in 1..series.len() {
         if let (Some(a), Some(b)) = (series[i - 1], series[i]) {
-            ctx.draw(&CanvasLine {
-                x1: i as f64 - 0.5,
-                y1: a,
-                x2: i as f64 + 0.5,
-                y2: b,
-                color,
-            });
+            p.stroke(i as f64 - 0.5, a, i as f64 + 0.5, b, color);
         }
     }
 }
@@ -647,7 +690,7 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
                 .collect();
             let max = vols.iter().flatten().cloned().fold(0.0, f64::max);
             (
-                vec![(vols, theme::VOLUME)],
+                vec![(vols, theme::volume())],
                 (0.0, if max > 0.0 { max } else { 1.0 }),
                 PaneKind::Bars,
             )
@@ -655,7 +698,7 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         Pane::Rsi => (
             vec![(
                 sample(&indicators::rsi(&closes, 14), &buckets),
-                theme::ACCENT,
+                theme::accent(),
             )],
             (0.0, 100.0),
             PaneKind::Lines(vec![30.0, 70.0]),
@@ -675,9 +718,9 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
             );
             (
                 vec![
-                    (hist_s, theme::VOLUME),
-                    (macd_s, theme::ACCENT),
-                    (signal_s, theme::WARN),
+                    (hist_s, theme::volume()),
+                    (macd_s, theme::accent()),
+                    (signal_s, theme::warn()),
                 ],
                 bounds,
                 PaneKind::Lines(vec![0.0]),
@@ -687,7 +730,7 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
             let a = sample(&indicators::atr(bars, 14), &buckets);
             let max = a.iter().flatten().cloned().fold(0.0, f64::max);
             (
-                vec![(a, theme::WARN)],
+                vec![(a, theme::warn())],
                 (0.0, if max > 0.0 { max } else { 1.0 }),
                 PaneKind::Line,
             )
@@ -696,8 +739,8 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
             let s = indicators::stochastic(bars, 14, 3);
             (
                 vec![
-                    (sample(&s.k, &buckets), theme::ACCENT),
-                    (sample(&s.d, &buckets), theme::WARN),
+                    (sample(&s.k, &buckets), theme::accent()),
+                    (sample(&s.d, &buckets), theme::warn()),
                 ],
                 (0.0, 100.0),
                 PaneKind::Lines(vec![20.0, 80.0]),
@@ -707,9 +750,9 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
             let a = indicators::adx(bars, 14);
             (
                 vec![
-                    (sample(&a.adx, &buckets), theme::ACCENT),
-                    (sample(&a.plus_di, &buckets), theme::UP),
-                    (sample(&a.minus_di, &buckets), theme::DOWN),
+                    (sample(&a.adx, &buckets), theme::accent()),
+                    (sample(&a.plus_di, &buckets), theme::up()),
+                    (sample(&a.minus_di, &buckets), theme::down()),
                 ],
                 (0.0, 100.0),
                 // 25 is the conventional line between trending and ranging.
@@ -724,7 +767,7 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
             let (_, mut hi) = symmetric_bounds(c.iter().flatten().cloned());
             hi = hi.max(150.0);
             (
-                vec![(c, theme::ACCENT)],
+                vec![(c, theme::accent())],
                 (-hi, hi),
                 PaneKind::Lines(vec![-100.0, 0.0, 100.0]),
             )
@@ -732,7 +775,7 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         Pane::WilliamsR => (
             vec![(
                 sample(&indicators::williams_r(bars, 14), &buckets),
-                theme::ACCENT,
+                theme::accent(),
             )],
             // %R is inverted: 0 is the top of the range, -100 the bottom.
             (-100.0, 0.0),
@@ -743,44 +786,56 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     draw_price_axis(f, axis_area, bounds.0, bounds.1);
 
     let n = buckets.len().max(1);
-    let canvas = Canvas::default()
-        .marker(theme::marker(symbols::Marker::Braille))
-        .x_bounds([0.0, n as f64])
-        .y_bounds([bounds.0, bounds.1])
-        .paint(move |ctx| {
-            if let PaneKind::Lines(levels) = &kind {
-                for level in levels {
-                    ctx.draw(&CanvasLine {
-                        x1: 0.0,
-                        y1: *level,
-                        x2: n as f64,
-                        y2: *level,
-                        color: theme::BORDER,
-                    });
-                }
-            }
+    let art = PaneArt {
+        series,
+        kind,
+        columns: n,
+    };
+    let x_bounds = [0.0, n as f64];
+    let y_bounds = [bounds.0, bounds.1];
 
-            for (s, color) in &series {
-                match kind {
-                    PaneKind::Bars => {
-                        for (i, v) in s.iter().enumerate() {
-                            if let Some(v) = v {
-                                ctx.draw(&Rectangle {
-                                    x: i as f64 + 0.15,
-                                    y: 0.0,
-                                    width: 0.7,
-                                    height: *v,
-                                    color: *color,
-                                });
-                            }
+    if let Some(mut plot) = paint::begin(plot_area, x_bounds, y_bounds) {
+        art.paint(&mut plot);
+        paint::finish(f, "chart.pane", plot_area, plot);
+    } else {
+        let canvas = Canvas::default()
+            .marker(theme::marker(symbols::Marker::Braille))
+            .x_bounds(x_bounds)
+            .y_bounds(y_bounds)
+            .paint(|ctx| art.paint(ctx));
+        f.render_widget(canvas, plot_area);
+    }
+}
+
+/// The indicator pane's content, independent of how it is drawn.
+struct PaneArt {
+    series: Vec<(Series, Color)>,
+    kind: PaneKind,
+    columns: usize,
+}
+
+impl PaneArt {
+    fn paint<P: Paint>(&self, p: &mut P) {
+        let n = self.columns as f64;
+        if let PaneKind::Lines(levels) = &self.kind {
+            for level in levels {
+                p.stroke(0.0, *level, n, *level, theme::border());
+            }
+        }
+
+        for (s, color) in &self.series {
+            match self.kind {
+                PaneKind::Bars => {
+                    for (i, v) in s.iter().enumerate() {
+                        if let Some(v) = v {
+                            p.fill(i as f64 + 0.15, 0.0, 0.7, *v, *color);
                         }
                     }
-                    _ => draw_overlay(ctx, s, *color),
                 }
+                _ => draw_overlay(p, s, *color),
             }
-        });
-
-    f.render_widget(canvas, plot_area);
+        }
+    }
 }
 
 enum PaneKind {
@@ -1113,6 +1168,58 @@ mod tests {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             term.draw(|f| draw(f, f.area(), &app)).unwrap();
         }
+    }
+
+    /// The pixel renderer must put the candles where the axes say they are.
+    ///
+    /// Checked against a plot built here rather than through `draw`, which only
+    /// reaches for images on a terminal that supports them — this has to hold
+    /// on every machine the tests run on.
+    #[test]
+    fn candles_land_on_their_own_columns_when_drawn_as_pixels() {
+        use crate::ui::gfx::{Image, Plot};
+
+        let candles = vec![
+            // A red session: opens at 20, closes at 10.
+            bar(0, 20.0, 22.0, 8.0, 10.0, 1.0),
+            // A green one: opens at 10, closes at 20.
+            bar(86_400, 10.0, 22.0, 8.0, 20.0, 1.0),
+        ];
+        let art = PriceArt {
+            candles: &candles,
+            style: ChartStyle::Candles,
+            sma: None,
+            ema: None,
+            bb: None,
+            donchian: None,
+            ichimoku: None,
+            levels: &[],
+            lo: 0.0,
+            hi: 30.0,
+        };
+        let mut plot = Plot::new(
+            Image::new(100, 90, Color::Rgb(0, 0, 0)),
+            [0.0, 2.0],
+            [0.0, 30.0],
+        );
+        art.paint(&mut plot);
+
+        // Column 0 spans x 0..50, column 1 spans 50..100. Price 15 — inside
+        // both bodies — is at y = (1 - 15/30) * 90 = 45.
+        let (down_r, _, _) = plot.image.sample(25, 45);
+        let (up_r, up_g, _) = plot.image.sample(75, 45);
+        assert!(down_r > 0, "the falling session's body is drawn");
+        assert!(
+            up_g > up_r,
+            "and the rising one is drawn in the up colour, not the down one"
+        );
+
+        // Above the high of both candles there is nothing but background.
+        assert_eq!(
+            plot.image.sample(25, 5),
+            (0, 0, 0),
+            "nothing above the wick"
+        );
     }
 
     #[test]

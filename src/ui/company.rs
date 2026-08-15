@@ -79,7 +79,7 @@ fn draw_header(f: &mut Frame, area: Rect, c: &Company) {
     let left = Line::from(vec![
         Span::styled(
             format!(" {} ", c.symbol),
-            Style::new().fg(theme::ACCENT).bold(),
+            Style::new().fg(theme::accent()).bold(),
         ),
         Span::styled(theme::truncate(&c.name, name_w), theme::value_style()),
     ]);
@@ -113,8 +113,8 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
 
     let tabs = Tabs::new(titles)
         .select(selected)
-        .style(Style::new().fg(theme::MUTED))
-        .highlight_style(Style::new().fg(theme::ACCENT).bold())
+        .style(Style::new().fg(theme::muted()))
+        .highlight_style(Style::new().fg(theme::accent()).bold())
         .divider(Span::styled("│", theme::border_style()));
 
     f.render_widget(tabs, area);
@@ -427,7 +427,7 @@ fn draw_grid(f: &mut Frame, area: Rect, title: &str, cols: &[Column<'_>], scale:
                     Some(v) => theme::compact(v * 1_000.0),
                 };
                 let style = match v {
-                    Some(v) if v < 0.0 => Style::new().fg(theme::DOWN),
+                    Some(v) if v < 0.0 => Style::new().fg(theme::down()),
                     Some(_) => theme::value_style(),
                     None => theme::label_style(),
                 };
@@ -554,7 +554,7 @@ fn draw_announcements(f: &mut Frame, area: Rect, c: &Company, cursor: usize, app
             Span::styled(" PDF ", theme::label_style()),
             Span::styled(
                 theme::truncate(link, area.width.saturating_sub(7) as usize),
-                Style::new().fg(theme::ACCENT),
+                Style::new().fg(theme::accent()),
             ),
         ]),
     ]);
@@ -563,18 +563,18 @@ fn draw_announcements(f: &mut Frame, area: Rect, c: &Company, cursor: usize, app
 
 fn announcement_row<'a>(a: &'a Announcement, selected: bool) -> Row<'a> {
     let base = if selected {
-        Style::new().bg(theme::SELECT_BG)
+        Style::new().bg(theme::select_bg())
     } else {
         Style::new()
     };
     let kind_color = match a.category {
-        crate::model::AnnouncementKind::FinancialResults => theme::UP,
-        crate::model::AnnouncementKind::BoardMeeting => theme::WARN,
-        crate::model::AnnouncementKind::Other => theme::MUTED,
+        crate::model::AnnouncementKind::FinancialResults => theme::up(),
+        crate::model::AnnouncementKind::BoardMeeting => theme::warn(),
+        crate::model::AnnouncementKind::Other => theme::muted(),
     };
     let (pdf, pdf_color) = match a.pdf_url {
-        Some(_) => ("PDF", theme::ACCENT),
-        None => ("—", theme::DIM),
+        Some(_) => ("PDF", theme::accent()),
+        None => ("—", theme::dim()),
     };
 
     Row::new(vec![

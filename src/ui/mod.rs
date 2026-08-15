@@ -7,9 +7,11 @@ pub mod chart;
 pub mod company;
 pub mod compare;
 pub mod dashboard;
+pub mod gfx;
 pub mod hit;
 pub mod intraday;
 pub mod macro_;
+pub mod paint;
 pub mod screener;
 pub mod seasonality;
 pub mod theme;
@@ -20,7 +22,33 @@ use ratatui::widgets::{Block, Clear, Paragraph, Tabs, Wrap};
 
 use crate::app::{App, Screen};
 
+/// The style the whole screen sits on.
+///
+/// The default theme leaves the terminal's own background showing — including
+/// whatever transparency it was configured with. Every other theme owns it,
+/// because a Solarized foreground over someone else's background is not
+/// Solarized. So does *any* theme once charts are drawn as images: a bitmap has
+/// to be painted onto some definite colour, and a chart on one background
+/// inside a UI on another looks like a bug.
+pub fn screen_style() -> Style {
+    let p = theme::palette();
+    Style::new().fg(p.fg).bg(if p.opaque || gfx::enabled() {
+        p.bg
+    } else {
+        Color::Reset
+    })
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
+    f.render_widget(Block::default().style(screen_style()), f.area());
+
+    // A chart drawn as an image sits *below* the text but *above* the cell
+    // background, which is exactly what makes labelled charts work — and
+    // exactly wrong under a modal, whose cleared cells would let the chart show
+    // straight through it. While one is open the charts go back to glyphs,
+    // which an overlay covers like any other text.
+    gfx::begin_frame(modal_open(app));
+
     let [ticker, tabs, body, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -62,6 +90,14 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
+/// Whether anything is drawn over the body this frame.
+///
+/// The three are the help sheet, the comparison picker, and the first-run
+/// overlay — the same list [`draw`] renders after the screen itself.
+fn modal_open(app: &App) -> bool {
+    app.show_help || app.compare.picker.is_some() || app.quotes.is_empty()
+}
+
 /// A single-line index ticker across the top.
 fn draw_ticker(f: &mut Frame, area: Rect, app: &App) {
     if app.indices.is_empty() {
@@ -77,11 +113,11 @@ fn draw_ticker(f: &mut Frame, area: Rect, app: &App) {
         let color = theme::change_color(idx.change);
         spans.push(Span::styled(
             format!(" {} ", idx.name),
-            Style::new().fg(theme::MUTED).bold(),
+            Style::new().fg(theme::muted()).bold(),
         ));
         spans.push(Span::styled(
             theme::index_level(idx.value),
-            Style::new().fg(theme::FG),
+            Style::new().fg(theme::fg()),
         ));
         spans.push(Span::styled(
             format!(" {} ", theme::pct(idx.change_pct)),
@@ -105,7 +141,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, s)| {
             Line::from(vec![
-                Span::styled(format!("{} ", i + 1), Style::new().fg(theme::DIM)),
+                Span::styled(format!("{} ", i + 1), Style::new().fg(theme::dim())),
                 Span::raw(s.title()),
             ])
         })
@@ -113,8 +149,8 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
 
     let tabs = Tabs::new(titles)
         .select(app.screen.index())
-        .style(Style::new().fg(theme::MUTED))
-        .highlight_style(Style::new().fg(theme::ACCENT).bold())
+        .style(Style::new().fg(theme::muted()))
+        .highlight_style(Style::new().fg(theme::accent()).bold())
         .divider(Span::styled("│", theme::border_style()));
 
     f.render_widget(tabs, area);
@@ -148,9 +184,9 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
 
     // Search takes over the status line while it is open.
     if let Some(query) = &app.search {
-        spans.push(Span::styled(" / ", Style::new().fg(theme::ACCENT).bold()));
-        spans.push(Span::styled(query.clone(), Style::new().fg(theme::FG)));
-        spans.push(Span::styled("▏", Style::new().fg(theme::ACCENT)));
+        spans.push(Span::styled(" / ", Style::new().fg(theme::accent()).bold()));
+        spans.push(Span::styled(query.clone(), Style::new().fg(theme::fg())));
+        spans.push(Span::styled("▏", Style::new().fg(theme::accent())));
         spans.push(Span::styled(
             "   Enter to open · Esc to cancel",
             theme::label_style(),
@@ -162,10 +198,10 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     if !app.selected.is_empty() {
         spans.push(Span::styled(
             format!(" {} ", app.selected),
-            Style::new().fg(theme::ACCENT).bold(),
+            Style::new().fg(theme::accent()).bold(),
         ));
         if app.watchlist.contains(&app.selected) {
-            spans.push(Span::styled("★ ", Style::new().fg(theme::WARN)));
+            spans.push(Span::styled("★ ", Style::new().fg(theme::warn())));
         }
         if let Some(q) = app.selected_quote() {
             spans.push(Span::styled(theme::price(q.current), theme::value_style()));
@@ -181,7 +217,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     if let Some(err) = &app.error {
         spans.push(Span::styled(
             format!("⚠ {} ", theme::truncate(err, 60)),
-            Style::new().fg(theme::DOWN),
+            Style::new().fg(theme::down()),
         ));
         spans.push(Span::styled("(Esc) ", theme::label_style()));
     } else {
@@ -193,11 +229,11 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     if !app.activities.is_empty() {
         spans.push(Span::styled(
             format!("  {} ", app.spinner_glyph()),
-            Style::new().fg(theme::WARN),
+            Style::new().fg(theme::warn()),
         ));
         spans.push(Span::styled(
             app.activities.join(" · "),
-            Style::new().fg(theme::WARN),
+            Style::new().fg(theme::warn()),
         ));
     }
 
@@ -206,7 +242,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled("backfill ", theme::label_style()));
         spans.push(Span::styled(
             widgets::bar(b.ratio(), 12),
-            Style::new().fg(theme::ACCENT),
+            Style::new().fg(theme::accent()),
         ));
         spans.push(Span::styled(
             format!(" {}/{} {}", b.done, b.total, b.day),
@@ -215,7 +251,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         if let Some(rows) = b.rows {
             spans.push(Span::styled(
                 format!(" ({rows} symbols)"),
-                Style::new().fg(theme::DIM),
+                Style::new().fg(theme::dim()),
             ));
         }
     }
@@ -265,7 +301,7 @@ fn draw_startup(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
 
     let block = Block::bordered()
-        .border_style(Style::new().fg(theme::ACCENT))
+        .border_style(Style::new().fg(theme::accent()))
         .title(Span::styled(" Connecting to PSX ", theme::title_style()));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -275,11 +311,11 @@ fn draw_startup(f: &mut Frame, app: &App) {
 
     let step = |done: bool, active: bool, label: &str, detail: &str| {
         let (mark, style) = if done {
-            ("✓", Style::new().fg(theme::UP))
+            ("✓", Style::new().fg(theme::up()))
         } else if active {
-            ("→", Style::new().fg(theme::WARN))
+            ("→", Style::new().fg(theme::warn()))
         } else {
-            ("·", Style::new().fg(theme::DIM))
+            ("·", Style::new().fg(theme::dim()))
         };
         Line::from(vec![
             Span::styled(format!("  {mark} "), style),
@@ -291,7 +327,7 @@ fn draw_startup(f: &mut Frame, app: &App) {
                     theme::label_style()
                 },
             ),
-            Span::styled(detail.to_string(), Style::new().fg(theme::DIM)),
+            Span::styled(detail.to_string(), Style::new().fg(theme::dim())),
         ])
     };
 
@@ -328,21 +364,24 @@ fn draw_startup(f: &mut Frame, app: &App) {
 
     if let Some(b) = &app.backfill {
         lines.push(Line::from(vec![
-            Span::styled("  → ", Style::new().fg(theme::WARN)),
+            Span::styled("  → ", Style::new().fg(theme::warn())),
             Span::styled(format!("{:<18}", "OHLC backfill"), theme::value_style()),
             Span::styled(
                 format!("{}/{} sessions", b.done, b.total),
-                Style::new().fg(theme::DIM),
+                Style::new().fg(theme::dim()),
             ),
         ]));
         lines.push(Line::from(vec![
             Span::raw("      "),
-            Span::styled(widgets::bar(b.ratio(), 28), Style::new().fg(theme::ACCENT)),
-            Span::styled(format!(" {}", b.day), Style::new().fg(theme::DIM)),
+            Span::styled(
+                widgets::bar(b.ratio(), 28),
+                Style::new().fg(theme::accent()),
+            ),
+            Span::styled(format!(" {}", b.day), Style::new().fg(theme::dim())),
         ]));
         lines.push(Line::from(Span::styled(
             "      true daily high/low — one request per session",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(theme::dim()),
         )));
         lines.push(Line::raw(""));
     }
@@ -350,18 +389,18 @@ fn draw_startup(f: &mut Frame, app: &App) {
     lines.push(Line::from(vec![
         Span::styled(
             format!("  {} ", app.spinner_glyph()),
-            Style::new().fg(theme::WARN),
+            Style::new().fg(theme::warn()),
         ),
         Span::styled(app.status.clone(), theme::label_style()),
     ]));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "  Requests are paced to stay gentle on PSX. This runs",
-        Style::new().fg(theme::DIM),
+        Style::new().fg(theme::dim()),
     )));
     lines.push(Line::from(Span::styled(
         "  once — later launches open straight from the cache.",
-        Style::new().fg(theme::DIM),
+        Style::new().fg(theme::dim()),
     )));
 
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
@@ -374,12 +413,12 @@ fn draw_help(f: &mut Frame) {
     let section = |t: &str| {
         Line::from(Span::styled(
             format!("  {t}"),
-            Style::new().fg(theme::ACCENT).bold(),
+            Style::new().fg(theme::accent()).bold(),
         ))
     };
     let bind = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("    {k:<16}"), Style::new().fg(theme::FG)),
+            Span::styled(format!("    {k:<16}"), Style::new().fg(theme::fg())),
             Span::styled(d.to_string(), theme::label_style()),
         ])
     };
@@ -403,6 +442,7 @@ fn draw_help(f: &mut Frame) {
         bind("/", "search symbol, company or sector"),
         bind("r", "refresh market data"),
         bind("w", "toggle watchlist for current symbol"),
+        bind("T", "cycle colour theme"),
         bind("M", "mouse on/off (off restores text selection)"),
         bind("?", "this help"),
         bind("q / Ctrl-C", "quit"),
@@ -458,7 +498,10 @@ fn draw_help(f: &mut Frame) {
         section("Backtest"),
         bind("f", "move focus between strategies and parameters"),
         bind("j / k, ↑ ↓", "move within the focused panel"),
-        bind("← → , - +", "tweak the selected parameter (H / L by ten)"),
+        bind(
+            "← → , - +",
+            "tweak the parameter — takes focus (H / L by ten)",
+        ),
         bind("d", "reset parameters to the strategy's defaults"),
         bind("Enter", "run on the selected symbol"),
         bind("v / V", "cycle the results view"),
@@ -472,12 +515,12 @@ fn draw_help(f: &mut Frame) {
         Line::raw(""),
         Line::from(Span::styled(
             "    Data: Pakistan Stock Exchange (dps.psx.com.pk)",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(theme::dim()),
         )),
     ]);
 
     let block = Block::bordered()
-        .border_style(Style::new().fg(theme::ACCENT))
+        .border_style(Style::new().fg(theme::accent()))
         .title(Span::styled(" Keys ", theme::title_style()));
 
     f.render_widget(

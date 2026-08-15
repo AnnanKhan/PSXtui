@@ -32,6 +32,11 @@ fn usage() -> String {
     let db = psxtui::cache::default_db_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "your platform data directory".into());
+    let themes = psxtui::ui::theme::THEMES
+        .iter()
+        .map(|t| t.key)
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "\
 psxtui — a terminal client for Pakistan Stock Exchange market data
@@ -43,10 +48,15 @@ Options:
   -V, --version    show the version
 
 Environment:
+  PSXTUI_THEME=<name>   start in a theme: {themes}
+  PSXTUI_GRAPHICS=off   draw charts with glyphs even on a terminal that could
+                        render them as images (=kitty forces the other way)
+  PSXTUI_CELL=9x18      cell size in pixels, if the terminal misreports it
   PSXTUI_MARKER=block   draw charts with half-block glyphs instead of braille,
                         for fonts that have no braille (some Windows consoles)
 
-Everything else happens inside the app: press ? for keys, q to quit.
+Everything else happens inside the app: press ? for keys, T for the next
+theme, q to quit.
 Cached data lives in {db}
 "
     )
@@ -113,7 +123,10 @@ async fn main() -> Result<()> {
     let result = run(&mut app, &mut ev_rx, input_rx).await;
 
     // Leave mouse reporting off on the way out: a terminal left in that mode
-    // after the process exits stops responding to selection entirely.
+    // after the process exits stops responding to selection entirely. Charts
+    // drawn as images have to go the same way — a placement outlives the
+    // process that made it, and would otherwise sit on top of the shell.
+    let _ = ui::gfx::clear_all(&mut std::io::stdout());
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
@@ -137,7 +150,7 @@ async fn run(
     // while work is in flight, so an idle app costs nothing.
     let mut spinner = tokio::time::interval(SPINNER_TICK);
 
-    terminal.draw(|f| ui::draw(f, app))?;
+    render(&mut terminal, app)?;
 
     loop {
         tokio::select! {
@@ -188,8 +201,19 @@ async fn run(
         // Resolve any pending selection once, after the whole input burst has
         // been applied — not once per key.
         app.settle_selection();
-        terminal.draw(|f| ui::draw(f, app))?;
+        render(&mut terminal, app)?;
     }
+}
+
+/// Draw one frame, then hand any chart images to the terminal.
+///
+/// The two steps are separate because ratatui owns the cell grid and knows
+/// nothing about images: the escape sequences have to follow its own output for
+/// the frame, or they would be overwritten by it. See [`ui::gfx`].
+fn render(terminal: &mut ratatui::DefaultTerminal, app: &App) -> Result<()> {
+    terminal.draw(|f| ui::draw(f, app))?;
+    ui::gfx::present(&mut std::io::stdout())?;
+    Ok(())
 }
 
 /// Apply one terminal event. Returns whether it warrants a redraw.

@@ -190,7 +190,7 @@ fn draw_benchmark(f: &mut Frame, area: Rect, app: &App) {
             Span::raw(" "),
             Span::styled(
                 widgets::bar(r2, inner.width.saturating_sub(2) as usize),
-                Style::new().fg(theme::ACCENT),
+                Style::new().fg(theme::accent()),
             ),
         ]),
         Line::raw(""),
@@ -232,7 +232,7 @@ fn draw_drawdown(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 // A 50% fall saturates the bar: on PSX that is already a disaster.
                 widgets::bar(dd.pct.abs() / 0.5, inner.width.saturating_sub(2) as usize),
-                Style::new().fg(theme::DOWN),
+                Style::new().fg(theme::down()),
             ),
         ]),
         widgets::stat("Peak", format!("{}  {}", day(peak), px(peak)), w),

@@ -12,9 +12,10 @@
 
 use ratatui::prelude::*;
 use ratatui::symbols::Marker;
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
+use ratatui::widgets::canvas::Canvas;
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
+use super::paint::{self, Paint};
 use super::{theme, widgets};
 use crate::app::App;
 use crate::app::backtest_state::{Focus, View};
@@ -48,7 +49,7 @@ fn draw_strategies(f: &mut Frame, area: Rect, app: &App) {
         };
         f.render_widget(
             Paragraph::new(msg)
-                .style(Style::default().fg(theme::MUTED))
+                .style(Style::default().fg(theme::muted()))
                 .wrap(Wrap { trim: true }),
             inner,
         );
@@ -64,13 +65,13 @@ fn draw_strategies(f: &mut Frame, area: Rect, app: &App) {
         let marker = if selected { "▸ " } else { "  " };
         let style = if selected {
             Style::default()
-                .fg(theme::FG)
-                .bg(theme::SELECT_BG)
+                .fg(theme::fg())
+                .bg(theme::select_bg())
                 .add_modifier(Modifier::BOLD)
         } else if bt.focus == Focus::Strategies {
-            Style::default().fg(theme::FG)
+            Style::default().fg(theme::fg())
         } else {
-            Style::default().fg(theme::MUTED)
+            Style::default().fg(theme::muted())
         };
         lines.push(Line::from(vec![Span::styled(
             format!(
@@ -109,7 +110,7 @@ fn draw_params(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     format!("  {part}")
                 },
-                Style::default().fg(theme::DOWN),
+                Style::default().fg(theme::down()),
             ));
         }
     }
@@ -131,7 +132,7 @@ fn draw_params(f: &mut Frame, area: Rect, app: &App) {
 
     if !s.about.is_empty() {
         for line in wrap_text(&s.about, inner.width as usize) {
-            lines.push(Line::styled(line, Style::default().fg(theme::MUTED)));
+            lines.push(Line::styled(line, Style::default().fg(theme::muted())));
         }
         lines.push(Line::raw(""));
     }
@@ -139,7 +140,7 @@ fn draw_params(f: &mut Frame, area: Rect, app: &App) {
     if s.params.is_empty() {
         lines.push(Line::styled(
             "No tunable parameters.",
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ));
     }
 
@@ -152,32 +153,32 @@ fn draw_params(f: &mut Frame, area: Rect, app: &App) {
             // A tweaked value must be obvious — it is the difference between
             // the published strategy and the user's variant of it.
             Style::default()
-                .fg(theme::WARN)
+                .fg(theme::warn())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::FG)
+            Style::default().fg(theme::fg())
         };
 
         let mut spans = vec![
             Span::styled(
                 if focused { "▸ " } else { "  " },
-                Style::default().fg(theme::ACCENT),
+                Style::default().fg(theme::accent()),
             ),
             Span::styled(
                 format!("{name:<12}"),
-                Style::default().fg(if focused { theme::FG } else { theme::MUTED }),
+                Style::default().fg(if focused { theme::fg() } else { theme::muted() }),
             ),
             Span::styled(format!("{value:>8}", value = fmt_param(value)), value_style),
         ];
         if changed {
             spans.push(Span::styled(
                 format!(" (was {})", fmt_param(def.default)),
-                Style::default().fg(theme::DIM),
+                Style::default().fg(theme::dim()),
             ));
         }
         let mut line = Line::from(spans);
         if focused {
-            line = line.style(Style::default().bg(theme::SELECT_BG));
+            line = line.style(Style::default().bg(theme::select_bg()));
         }
         lines.push(line);
     }
@@ -190,17 +191,17 @@ fn draw_params(f: &mut Frame, area: Rect, app: &App) {
             "costs {:.0}bp + {:.0}bp slippage",
             bt.config.costs.commission_bps, bt.config.costs.slippage_bps
         ),
-        Style::default().fg(theme::DIM),
+        Style::default().fg(theme::dim()),
     ));
     lines.push(Line::styled(
         format!("rank by {}", bt.objective.label()),
-        Style::default().fg(theme::DIM),
+        Style::default().fg(theme::dim()),
     ));
 
     if !s.source.is_empty() {
         lines.push(Line::raw(""));
         for line in wrap_text(&format!("Source: {}", s.source), inner.width as usize) {
-            lines.push(Line::styled(line, Style::default().fg(theme::DIM)));
+            lines.push(Line::styled(line, Style::default().fg(theme::dim())));
         }
     }
 
@@ -246,7 +247,7 @@ fn draw_results(f: &mut Frame, area: Rect, app: &App) {
     if let Some(e) = &bt.error {
         f.render_widget(
             Paragraph::new(e.as_str())
-                .style(Style::default().fg(theme::DOWN))
+                .style(Style::default().fg(theme::down()))
                 .wrap(Wrap { trim: true }),
             inner,
         );
@@ -265,7 +266,7 @@ fn draw_results(f: &mut Frame, area: Rect, app: &App) {
 fn hint(f: &mut Frame, area: Rect, msg: &str) {
     f.render_widget(
         Paragraph::new(msg)
-            .style(Style::default().fg(theme::MUTED))
+            .style(Style::default().fg(theme::muted()))
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -313,9 +314,9 @@ fn draw_equity(f: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from(vec![
                     Span::styled(
                         if i == 0 { "! " } else { "  " },
-                        Style::default().fg(theme::WARN),
+                        Style::default().fg(theme::warn()),
                     ),
-                    Span::styled(part, Style::default().fg(theme::WARN)),
+                    Span::styled(part, Style::default().fg(theme::warn())),
                 ]));
             }
         }
@@ -328,7 +329,7 @@ fn draw_stats(f: &mut Frame, area: Rect, r: &Report) {
     // the rest of the app supports.
     let col = |label: &'static str, value: String, color: Color| -> Vec<Span<'static>> {
         vec![
-            Span::styled(format!("{label:<10}"), Style::default().fg(theme::MUTED)),
+            Span::styled(format!("{label:<10}"), Style::default().fg(theme::muted())),
             Span::styled(format!("{value:<10}"), Style::default().fg(color)),
         ]
     };
@@ -352,17 +353,17 @@ fn draw_stats(f: &mut Frame, area: Rect, r: &Report) {
     line1.extend(col(
         "max DD",
         theme::pct_plain(r.max_drawdown_pct),
-        theme::DOWN,
+        theme::down(),
     ));
 
     let mut line2 = Vec::new();
-    line2.extend(col("Sharpe", format!("{:.2}", r.sharpe), theme::FG));
-    line2.extend(col("Sortino", format!("{:.2}", r.sortino), theme::FG));
-    line2.extend(col("trades", r.trade_count.to_string(), theme::FG));
+    line2.extend(col("Sharpe", format!("{:.2}", r.sharpe), theme::fg()));
+    line2.extend(col("Sortino", format!("{:.2}", r.sortino), theme::fg()));
+    line2.extend(col("trades", r.trade_count.to_string(), theme::fg()));
     line2.extend(col(
         "win rate",
         format!("{:.0}%", r.win_rate_pct),
-        theme::FG,
+        theme::fg(),
     ));
 
     let mut line3 = Vec::new();
@@ -373,19 +374,19 @@ fn draw_stats(f: &mut Frame, area: Rect, r: &Report) {
         } else {
             "—".into()
         },
-        theme::FG,
+        theme::fg(),
     ));
     line3.extend(col(
         "exposure",
         format!("{:.0}%", r.exposure_pct),
-        theme::FG,
+        theme::fg(),
     ));
     line3.extend(col(
         "avg hold",
         format!("{:.0}d", r.avg_bars_held),
-        theme::FG,
+        theme::fg(),
     ));
-    line3.extend(col("bars", r.bar_count.to_string(), theme::FG));
+    line3.extend(col("bars", r.bar_count.to_string(), theme::fg()));
 
     f.render_widget(
         Paragraph::new(vec![
@@ -441,60 +442,53 @@ fn draw_equity_curve(f: &mut Frame, area: Rect, app: &App, r: &Report) {
     let initial = r.initial_equity;
     let n = equity.len();
 
-    let canvas = Canvas::default()
-        .block(Block::default())
-        .marker(theme::marker(Marker::Braille))
-        .x_bounds([0.0, n as f64])
-        .y_bounds([lo, hi])
-        .paint(move |ctx| {
-            // The starting capital, so drawdown below the line is obvious.
-            if initial >= lo && initial <= hi {
-                ctx.draw(&CanvasLine {
-                    x1: 0.0,
-                    y1: initial,
-                    x2: n as f64,
-                    y2: initial,
-                    color: theme::BORDER,
-                });
-            }
+    let art = |p: &mut dyn Paint| {
+        // The starting capital, so drawdown below the line is obvious.
+        if initial >= lo && initial <= hi {
+            p.stroke(0.0, initial, n as f64, initial, theme::border());
+        }
 
-            // Buy-and-hold underneath: it is the benchmark, not the subject.
-            for w in hold_curve.windows(2).enumerate() {
-                let (i, pair) = w;
-                ctx.draw(&CanvasLine {
-                    x1: i as f64,
-                    y1: pair[0],
-                    x2: (i + 1) as f64,
-                    y2: pair[1],
-                    color: theme::DIM,
-                });
-            }
+        // Buy-and-hold underneath: it is the benchmark, not the subject.
+        for (i, pair) in hold_curve.windows(2).enumerate() {
+            p.stroke(i as f64, pair[0], (i + 1) as f64, pair[1], theme::dim());
+        }
 
-            for (i, pair) in equity.windows(2).enumerate() {
-                let rising = pair[1] >= pair[0];
-                ctx.draw(&CanvasLine {
-                    x1: i as f64,
-                    y1: pair[0],
-                    x2: (i + 1) as f64,
-                    y2: pair[1],
-                    color: if rising { theme::UP } else { theme::DOWN },
-                });
-            }
-        });
+        for (i, pair) in equity.windows(2).enumerate() {
+            let rising = pair[1] >= pair[0];
+            p.stroke(
+                i as f64,
+                pair[0],
+                (i + 1) as f64,
+                pair[1],
+                if rising { theme::up() } else { theme::down() },
+            );
+        }
+    };
 
-    f.render_widget(canvas, chart_area);
+    if let Some(mut hd) = paint::begin(chart_area, [0.0, n as f64], [lo, hi]) {
+        art(&mut hd);
+        paint::finish(f, "backtest.equity", chart_area, hd);
+    } else {
+        let canvas = Canvas::default()
+            .block(Block::default())
+            .marker(theme::marker(Marker::Braille))
+            .x_bounds([0.0, n as f64])
+            .y_bounds([lo, hi])
+            .paint(|ctx| art(ctx));
+        f.render_widget(canvas, chart_area);
+    }
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("── strategy  ", Style::default().fg(theme::UP)),
-            Span::styled("── buy & hold  ", Style::default().fg(theme::DIM)),
+            Span::styled("── strategy  ", Style::default().fg(theme::up())),
+            Span::styled("── buy & hold  ", Style::default().fg(theme::dim())),
             Span::styled(
                 format!(
                     "{} → {}",
                     theme::compact(r.initial_equity),
                     theme::compact(r.final_equity)
                 ),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
         ])),
         legend_area,
@@ -531,19 +525,19 @@ fn draw_trades(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<12} ", trading_day(t.entry_ts)),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
             Span::styled(
                 format!("{:<12} ", trading_day(t.exit_ts)),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
             Span::styled(
                 format!("{:>9} ", theme::price(t.entry_price)),
-                Style::default().fg(theme::FG),
+                Style::default().fg(theme::fg()),
             ),
             Span::styled(
                 format!("{:>9} ", theme::price(t.exit_price)),
-                Style::default().fg(theme::FG),
+                Style::default().fg(theme::fg()),
             ),
             Span::styled(
                 format!("{:>8} ", theme::pct(t.return_pct)),
@@ -551,14 +545,14 @@ fn draw_trades(f: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(
                 format!("{:>6} ", t.bars_held),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
             Span::styled(
                 format!("{:>7}", t.exit_reason.label()),
                 Style::default().fg(match t.exit_reason {
-                    TradeExit::StopLoss => theme::DOWN,
-                    TradeExit::TakeProfit => theme::UP,
-                    _ => theme::DIM,
+                    TradeExit::StopLoss => theme::down(),
+                    TradeExit::TakeProfit => theme::up(),
+                    _ => theme::dim(),
                 }),
             ),
         ]));
@@ -600,12 +594,16 @@ fn draw_sweep(f: &mut Frame, area: Rect, app: &App) {
     for (i, p) in bt.sweep.iter().enumerate().skip(bt.sweep_offset).take(rows) {
         let mut spans = vec![Span::styled(
             format!("{:>8} ", format!("{:.3}", p.score)),
-            Style::default().fg(if i == 0 { theme::ACCENT } else { theme::MUTED }),
+            Style::default().fg(if i == 0 {
+                theme::accent()
+            } else {
+                theme::muted()
+            }),
         )];
         for n in &names {
             spans.push(Span::styled(
                 format!("{:>9} ", fmt_param(p.params.get(n).copied().unwrap_or(0.0))),
-                Style::default().fg(theme::FG),
+                Style::default().fg(theme::fg()),
             ));
         }
         spans.push(Span::styled(
@@ -614,15 +612,15 @@ fn draw_sweep(f: &mut Frame, area: Rect, app: &App) {
         ));
         spans.push(Span::styled(
             format!("{:>7} ", format!("{:.2}", p.sharpe)),
-            Style::default().fg(theme::FG),
+            Style::default().fg(theme::fg()),
         ));
         spans.push(Span::styled(
             format!("{:>8} ", theme::pct_plain(p.max_drawdown_pct)),
-            Style::default().fg(theme::DOWN),
+            Style::default().fg(theme::down()),
         ));
         spans.push(Span::styled(
             format!("{:>7}", p.trade_count),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ));
         lines.push(Line::from(spans));
     }
@@ -647,27 +645,27 @@ fn draw_walk_forward(f: &mut Frame, area: Rect, app: &App) {
         Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).areas(area);
 
     let efficiency_color = if wf.efficiency >= 0.6 {
-        theme::UP
+        theme::up()
     } else if wf.efficiency >= 0.3 {
-        theme::WARN
+        theme::warn()
     } else {
-        theme::DOWN
+        theme::down()
     };
 
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("in-sample  ", Style::default().fg(theme::MUTED)),
+                Span::styled("in-sample  ", Style::default().fg(theme::muted())),
                 Span::styled(
                     format!("{:<12}", theme::pct(wf.in_sample_return_pct)),
-                    Style::default().fg(theme::DIM),
+                    Style::default().fg(theme::dim()),
                 ),
-                Span::styled("out-of-sample  ", Style::default().fg(theme::MUTED)),
+                Span::styled("out-of-sample  ", Style::default().fg(theme::muted())),
                 Span::styled(
                     format!("{:<12}", theme::pct(wf.out_of_sample_return_pct)),
                     Style::default().fg(theme::change_color(wf.out_of_sample_return_pct)),
                 ),
-                Span::styled("efficiency  ", Style::default().fg(theme::MUTED)),
+                Span::styled("efficiency  ", Style::default().fg(theme::muted())),
                 Span::styled(
                     format!("{:.2}", wf.efficiency),
                     Style::default()
@@ -707,7 +705,7 @@ fn draw_walk_forward(f: &mut Frame, area: Rect, app: &App) {
                     trading_day(fold.test_end_ts)
                 )
             ),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         )];
         for n in &names {
             spans.push(Span::styled(
@@ -715,12 +713,12 @@ fn draw_walk_forward(f: &mut Frame, area: Rect, app: &App) {
                     "{:>9} ",
                     fmt_param(fold.params.get(n).copied().unwrap_or(0.0))
                 ),
-                Style::default().fg(theme::FG),
+                Style::default().fg(theme::fg()),
             ));
         }
         spans.push(Span::styled(
             format!("{:>10} ", theme::pct(fold.in_sample_return_pct)),
-            Style::default().fg(theme::DIM),
+            Style::default().fg(theme::dim()),
         ));
         spans.push(Span::styled(
             format!("{:>10} ", theme::pct(fold.out_of_sample_return_pct)),
@@ -728,7 +726,7 @@ fn draw_walk_forward(f: &mut Frame, area: Rect, app: &App) {
         ));
         spans.push(Span::styled(
             format!("{:>7}", fold.trade_count),
-            Style::default().fg(theme::MUTED),
+            Style::default().fg(theme::muted()),
         ));
         lines.push(Line::from(spans));
     }
@@ -756,27 +754,27 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("symbols ", Style::default().fg(theme::MUTED)),
-                Span::styled(format!("{:<8}", s.symbols), Style::default().fg(theme::FG)),
-                Span::styled("median ", Style::default().fg(theme::MUTED)),
+                Span::styled("symbols ", Style::default().fg(theme::muted())),
+                Span::styled(format!("{:<8}", s.symbols), Style::default().fg(theme::fg())),
+                Span::styled("median ", Style::default().fg(theme::muted())),
                 Span::styled(
                     format!("{:<10}", theme::pct(s.median_return_pct)),
                     Style::default().fg(theme::change_color(s.median_return_pct)),
                 ),
-                Span::styled("profitable ", Style::default().fg(theme::MUTED)),
+                Span::styled("profitable ", Style::default().fg(theme::muted())),
                 Span::styled(
                     format!("{}/{}   ", s.profitable, s.symbols),
-                    Style::default().fg(theme::FG),
+                    Style::default().fg(theme::fg()),
                 ),
-                Span::styled("beat buy+hold ", Style::default().fg(theme::MUTED)),
+                Span::styled("beat buy+hold ", Style::default().fg(theme::muted())),
                 Span::styled(
                     format!("{}/{}", s.beat_buy_hold, s.symbols),
-                    Style::default().fg(theme::FG),
+                    Style::default().fg(theme::fg()),
                 ),
             ]),
             Line::styled(
                 "Survivorship: delisted scrips are not in PSX's symbol list, so this is biased upward.",
-                Style::default().fg(theme::WARN),
+                Style::default().fg(theme::warn()),
             ),
         ]),
         summary_area,
@@ -795,7 +793,9 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<12} ", theme::truncate(&row.symbol, 12)),
-                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::fg())
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{:>10} ", theme::pct(row.total_return_pct)),
@@ -803,23 +803,23 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(
                 format!("{:>10} ", theme::pct(row.buy_hold_return_pct)),
-                Style::default().fg(theme::DIM),
+                Style::default().fg(theme::dim()),
             ),
             Span::styled(
                 format!("{:>8} ", format!("{:.2}", row.sharpe)),
-                Style::default().fg(theme::FG),
+                Style::default().fg(theme::fg()),
             ),
             Span::styled(
                 format!("{:>9} ", theme::pct_plain(row.max_drawdown_pct)),
-                Style::default().fg(theme::DOWN),
+                Style::default().fg(theme::down()),
             ),
             Span::styled(
                 format!("{:>7} ", row.trade_count),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
             Span::styled(
                 format!("{:>6.0}", row.win_rate_pct),
-                Style::default().fg(theme::MUTED),
+                Style::default().fg(theme::muted()),
             ),
         ]));
     }

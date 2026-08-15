@@ -535,7 +535,9 @@ fn heat_cell(value: Option<f64>, width: usize, scale: f64) -> Span<'static> {
             "{:>width$}",
             theme::truncate(&text, width.saturating_sub(1))
         ),
-        Style::new().bg(widgets::heat_color(v, scale)).fg(theme::FG),
+        Style::new()
+            .bg(widgets::heat_color(v, scale))
+            .fg(theme::fg()),
     )
 }
 
@@ -559,7 +561,7 @@ fn draw_grid_narrow(f: &mut Frame, area: Rect, cells: &[MonthCell], scale: f64) 
                     format!("{:>8}", theme::pct(pct)),
                     Style::new()
                         .bg(widgets::heat_color(pct, scale * 3.0))
-                        .fg(theme::FG),
+                        .fg(theme::fg()),
                 ),
             ])
         })
@@ -640,9 +642,9 @@ fn draw_distribution(f: &mut Frame, area: Rect, values: &[f64]) {
             Span::styled("  kurt ", theme::label_style()),
             Span::styled(theme::opt(Some(d.kurtosis), 2), theme::value_style()),
             Span::styled("  up ", theme::label_style()),
-            Span::styled(format!("{}", d.up), Style::new().fg(theme::UP)),
+            Span::styled(format!("{}", d.up), Style::new().fg(theme::up())),
             Span::styled(" / dn ", theme::label_style()),
-            Span::styled(format!("{}", d.down), Style::new().fg(theme::DOWN)),
+            Span::styled(format!("{}", d.down), Style::new().fg(theme::down())),
         ]),
     ];
 

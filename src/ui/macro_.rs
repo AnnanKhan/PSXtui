@@ -86,7 +86,7 @@ fn draw_commodities(f: &mut Frame, area: Rect, app: &App) {
         )
     };
     let block = widgets::panel(&title).border_style(if focused {
-        Style::new().fg(theme::ACCENT)
+        Style::new().fg(theme::accent())
     } else {
         theme::border_style()
     });
@@ -122,7 +122,7 @@ fn draw_commodities(f: &mut Frame, area: Rect, app: &App) {
         }
         all.push(Line::from(Span::styled(
             format!("{} ", group.label()),
-            Style::new().fg(theme::MUTED).bold(),
+            Style::new().fg(theme::muted()).bold(),
         )));
         all.extend(rows.into_iter().map(|s| series_row(s, w)));
     }
@@ -156,7 +156,7 @@ fn draw_commodities(f: &mut Frame, area: Rect, app: &App) {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     marks.join(" "),
-                    Style::new().fg(theme::ACCENT),
+                    Style::new().fg(theme::accent()),
                 )))
                 .alignment(Alignment::Right),
                 Rect {
@@ -239,7 +239,7 @@ fn series_row(s: &MacroSeries, width: usize) -> Line<'static> {
         let room = width - used - 2;
         spans.push(Span::styled(
             format!("  {}", theme::truncate(link, room)),
-            Style::new().fg(theme::DIM),
+            Style::new().fg(theme::dim()),
         ));
     }
 
@@ -335,7 +335,7 @@ fn draw_correlation(f: &mut Frame, area: Rect, app: &App) {
         if thin {
             spans.push(Span::styled(
                 format!("{:>7}", "—"),
-                Style::new().fg(theme::DIM),
+                Style::new().fg(theme::dim()),
             ));
         } else {
             spans.push(Span::styled(
@@ -346,7 +346,7 @@ fn draw_correlation(f: &mut Frame, area: Rect, app: &App) {
         if w >= 40 {
             spans.push(Span::styled(
                 format!("  {overlap:>4} days"),
-                Style::new().fg(theme::DIM),
+                Style::new().fg(theme::dim()),
             ));
         }
         if w >= 56 {
@@ -362,7 +362,7 @@ fn draw_correlation(f: &mut Frame, area: Rect, app: &App) {
     if (lines.len() as u16) < inner.height {
         lines.push(Line::from(Span::styled(
             format!(" Aligned on shared trading days; <{MIN_OVERLAP} shown as \u{2014}"),
-            Style::new().fg(theme::DIM),
+            Style::new().fg(theme::dim()),
         )));
     }
 
@@ -407,7 +407,7 @@ fn draw_rates(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" SBP policy rate  ", theme::label_style()),
         Span::styled(
             theme::pct_plain(rates.policy_rate_pct),
-            Style::new().fg(theme::ACCENT).bold(),
+            Style::new().fg(theme::accent()).bold(),
         ),
         Span::styled(" p.a.", theme::label_style()),
     ])];
@@ -419,18 +419,18 @@ fn draw_rates(f: &mut Frame, area: Rect, app: &App) {
             " Source  fallback — SBP scrape unavailable"
         },
         Style::new().fg(if rates.fetched {
-            theme::DIM
+            theme::dim()
         } else {
-            theme::WARN
+            theme::warn()
         }),
     )));
     lines.push(Line::from(Span::styled(
         " Feeds the risk-free rate used by",
-        Style::new().fg(theme::DIM),
+        Style::new().fg(theme::dim()),
     )));
     lines.push(Line::from(Span::styled(
         " Sharpe and Sortino on Analysis.",
-        Style::new().fg(theme::DIM),
+        Style::new().fg(theme::dim()),
     )));
 
     lines.truncate(inner.height as usize);
@@ -448,7 +448,7 @@ fn draw_news(f: &mut Frame, area: Rect, app: &App) {
     };
     let focused = app.macro_focus == crate::app::MacroFocus::News;
     let block = widgets::panel(&title).border_style(if focused {
-        Style::new().fg(theme::ACCENT)
+        Style::new().fg(theme::accent())
     } else {
         theme::border_style()
     });
@@ -485,12 +485,12 @@ fn draw_news(f: &mut Frame, area: Rect, app: &App) {
             if w >= 44 {
                 let stamp = format!(" {:<12} ", theme::truncate(&h.when(), 12));
                 used += stamp.chars().count();
-                spans.push(Span::styled(stamp, Style::new().fg(theme::DIM)));
+                spans.push(Span::styled(stamp, Style::new().fg(theme::dim())));
             }
             if w >= 60 {
                 let src = format!("{:<4} ", theme::truncate(&h.source, 3));
                 used += src.chars().count();
-                spans.push(Span::styled(src, Style::new().fg(theme::MUTED)));
+                spans.push(Span::styled(src, Style::new().fg(theme::muted())));
             }
             if used == 0 {
                 spans.push(Span::raw(" "));
@@ -498,7 +498,7 @@ fn draw_news(f: &mut Frame, area: Rect, app: &App) {
             }
 
             let style = if hit {
-                Style::new().fg(theme::ACCENT).bold()
+                Style::new().fg(theme::accent()).bold()
             } else {
                 theme::value_style()
             };

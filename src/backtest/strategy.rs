@@ -245,7 +245,11 @@ impl Strategy {
             .map(|s| expr::parse(s).map_err(|e| anyhow!("filter rule (`{s}`): {e}")))
             .transpose()?;
 
-        // Function names, before anything is evaluated.
+        // Function names and argument counts, before anything is evaluated.
+        // Arity matters as much as the name: `prev(close)` is one argument
+        // short, and left to evaluation time it would surface as a strategy
+        // that loads and then never fires, because the sweep and the scan skip
+        // anything that errors.
         let mut fns = Vec::new();
         for e in parsed
             .values()
@@ -253,14 +257,19 @@ impl Strategy {
             .chain(exit.iter())
             .chain(filter.iter())
         {
-            expr::called_functions(e, &mut fns);
+            expr::calls(e, &mut fns);
         }
-        for f in &fns {
-            if !expr::FUNCTIONS.contains(&f.as_str()) {
-                bail!(
+        for (f, argc) in &fns {
+            match expr::arity_of(f) {
+                None => bail!(
                     "unknown function `{f}` — available: {}",
-                    expr::FUNCTIONS.join(", ")
-                );
+                    expr::function_names().join(", ")
+                ),
+                Some(want) if want != *argc => bail!(
+                    "`{f}` takes {want} argument{} but was given {argc}",
+                    if want == 1 { "" } else { "s" }
+                ),
+                Some(_) => {}
             }
         }
 
@@ -573,6 +582,26 @@ s = "sma(close, slow)"
 entry = "cross_above(f, s)"
 exit = "cross_below(f, s)"
 "#;
+
+    /// A call with the wrong number of arguments must be rejected on load.
+    /// Left to evaluation it becomes a strategy that never fires, because the
+    /// sweep and the scan skip anything that errors — the failure mode that
+    /// looks most like a result.
+    #[test]
+    fn a_call_with_the_wrong_argument_count_is_rejected() {
+        let toml = r#"
+name = "Bad"
+[rules]
+entry = "close > prev(close)"
+exit = "close < sma(close, 5)"
+"#;
+        let err = Strategy::parse(toml).unwrap_err().to_string();
+        assert!(err.contains("prev"), "{err}");
+        assert!(err.contains("2 arguments"), "{err}");
+
+        // The same file with the count corrected loads.
+        assert!(Strategy::parse(&toml.replace("prev(close)", "prev(close, 1)")).is_ok());
+    }
 
     #[test]
     fn a_well_formed_strategy_parses() {

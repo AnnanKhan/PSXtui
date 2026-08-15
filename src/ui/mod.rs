@@ -22,25 +22,8 @@ use ratatui::widgets::{Block, Clear, Paragraph, Tabs, Wrap};
 
 use crate::app::{App, Screen};
 
-/// The style the whole screen sits on.
-///
-/// The default theme leaves the terminal's own background showing — including
-/// whatever transparency it was configured with. Every other theme owns it,
-/// because a Solarized foreground over someone else's background is not
-/// Solarized. So does *any* theme once charts are drawn as images: a bitmap has
-/// to be painted onto some definite colour, and a chart on one background
-/// inside a UI on another looks like a bug.
-pub fn screen_style() -> Style {
-    let p = theme::palette();
-    Style::new().fg(p.fg).bg(if p.opaque || gfx::enabled() {
-        p.bg
-    } else {
-        Color::Reset
-    })
-}
-
 pub fn draw(f: &mut Frame, app: &App) {
-    f.render_widget(Block::default().style(screen_style()), f.area());
+    f.render_widget(Block::default().style(theme::screen_style()), f.area());
 
     // A chart drawn as an image sits *below* the text but *above* the cell
     // background, which is exactly what makes labelled charts work — and
@@ -469,7 +452,10 @@ fn draw_help(f: &mut Frame) {
         section("Chart"),
         bind("[ / ]", "range: 5D 1M 3M 6M YTD 1Y 2Y 3Y 5Y MAX"),
         bind("i", "cycle pane: volume RSI MACD ATR stoch ADX CCI %R"),
-        bind("c", "style: candles → line → dots → area"),
+        bind(
+            "c",
+            "style: candles → line → area (→ dots, glyph terminals)",
+        ),
         bind("m / e / b", "toggle SMA / EMA / Bollinger"),
         bind("d / k / v", "toggle Donchian / Ichimoku / S-R levels"),
         Line::raw(""),

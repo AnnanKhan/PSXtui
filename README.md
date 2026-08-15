@@ -39,9 +39,15 @@ Timeframes: 5D, 1M, 3M, 6M, YTD, 1Y, 2Y, 3Y, 5Y and MAX.
 | **Company** | ![Company](docs/company.png) |
 | **Intraday** | ![Intraday](docs/intraday.png) |
 | **Seasonality** | ![Seasonality](docs/seasonality.png) |
+| **Backtest** | ![Backtest](docs/backtest.png) |
 | **Keys (`?`)** | ![Help](docs/help.png) |
 
 </details>
+
+Every screenshot is a photograph of a real session in the `midnight` theme, with
+charts drawn as bitmaps through the terminal graphics protocol —
+[`docs/capture.sh`](docs/capture.sh) takes them, so they are reproducible rather
+than curated.
 
 
 ## Install
@@ -206,9 +212,17 @@ The axis labels, prices and dates stay ordinary terminal text drawn *over* the
 image, so they render at whatever hinting your font uses rather than being
 rasterised into the picture.
 
+Charts inherit the theme's ground. Under the default `terminal` theme they are
+drawn on a *transparent* one, so your terminal's own background — colour scheme,
+transparency, whatever is behind the window — shows through the plot exactly as
+it does through the rest of the UI. The app stays seamless with the terminal it
+is running in; it never lays a rectangle of its own background over yours.
+
 Everywhere else — an older terminal, a font without braille, inside tmux or
 screen — the braille canvas is still what runs, and nothing about the app
-changes. Images are also skipped for any frame with a dialog over it, and
+changes. The `dots` chart style belongs to that path: it draws the close line in
+braille for a font that renders half-blocks badly, so `c` only offers it where
+there are glyphs to choose between. Images are also skipped for any frame with a dialog over it, and
 turned off entirely by `PSXTUI_GRAPHICS=off`.
 
 Bitmaps are zlib-compressed before they go down the pty and are only re-sent
@@ -228,7 +242,7 @@ Press `?` in the app for the full list.
 | `W` / `e` | Watchlist only / equities only |
 | `w` | Add or remove the current symbol from the watchlist |
 | `[` / `]` | Chart range · `i` cycles the indicator pane |
-| `c` | Chart style: candles → line → dots → area (pixels where the terminal supports it, else braille) |
+| `c` | Chart style: candles → line → area, plus dots on a terminal drawing with glyphs |
 | `m` / `e` / `b` | Toggle SMA / EMA / Bollinger overlays |
 | `a` / `x` | Compare: add a symbol (opens the picker) / remove one · `c` resets |
 | `r` | Refresh · `q` quit |
@@ -507,9 +521,12 @@ cargo run --example live_smoke # exercises every parser against the live portal
 `live_smoke` is the one that catches a PSX layout change — unit tests only prove
 the parsers handle markup we wrote ourselves.
 
-`capture.sh` drives the real binary in a fixed-size tmux pane and photographs
+`capture.sh` drives the real binary in a fixed-size kitty window and photographs
 every screen, so the images above are reproducible rather than hand-cropped.
-They show live PSX data from the session they were captured in.
+They show live PSX data from the session they were captured in. It photographs a
+real window rather than replaying an ANSI dump because a chart is a bitmap the
+terminal was handed out of band — no capture of the cell grid can contain one.
+Needs kitty, xdotool and ImageMagick on X11.
 
 CI (`.github/workflows/ci.yml`) runs the tests on Linux, macOS **and Windows** —
 development happens on Linux, so the Windows job is the only thing keeping that

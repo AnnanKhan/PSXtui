@@ -232,6 +232,15 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
 
     let [axis_area, plot_area] =
         Layout::horizontal([Constraint::Length(AXIS_WIDTH), Constraint::Min(0)]).areas(inner);
+    // The bottom row carries the dates, so neither the plot nor the price
+    // gutter may write into it — the lowest price label used to land beside
+    // the first date and read as one number.
+    let [axis_area, _] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(date_rows(plot_area))])
+            .areas(axis_area);
+    let [plot_area, date_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(date_rows(plot_area))])
+            .areas(plot_area);
 
     // One candle per column keeps every session represented.
     let columns = plot_area.width as usize;
@@ -318,7 +327,7 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     }
     let (lo, hi) = pad_bounds(lo, hi);
 
-    draw_price_axis(f, axis_area, lo, hi);
+    draw_price_axis(f, axis_area, lo, hi, theme::price);
 
     let art = PriceArt {
         candles: &candles,
@@ -355,7 +364,7 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
     // over an image they stay at the font's own resolution, and a price written
     // in cells is legible where one rasterised into the plot would not be.
     draw_level_labels(f, plot_area, &levels, lo, hi);
-    draw_date_labels(f, plot_area, bars, &buckets);
+    draw_date_labels(f, date_area, bars, &buckets);
 }
 
 /// One overlay, sampled to one value per drawn column. `None` where the
@@ -561,12 +570,17 @@ fn draw_overlay<P: Paint>(p: &mut P, series: &[Option<f64>], color: Color) {
     }
 }
 
-/// Price gridline labels down the left gutter.
+/// Gridline labels down the left gutter, written by `fmt`.
 ///
 /// Labelling every row turns the gutter into a wall of numbers, so ticks are
 /// spaced to land roughly every four rows — enough to read a level off the
 /// chart, sparse enough to stay quiet.
-fn draw_price_axis(f: &mut Frame, area: Rect, lo: f64, hi: f64) {
+///
+/// The formatter is the caller's because the panes are not all prices: a
+/// volume axis in full digits overflows the gutter and gets truncated
+/// mid-number ("273,053,795." tells you nothing), where `59.3M` fits with room
+/// to spare.
+fn draw_price_axis(f: &mut Frame, area: Rect, lo: f64, hi: f64, fmt: fn(f64) -> String) {
     let rows = area.height;
     if rows == 0 {
         return;
@@ -588,11 +602,7 @@ fn draw_price_axis(f: &mut Frame, area: Rect, lo: f64, hi: f64) {
             };
             let value = lo + (hi - lo) * t;
             Line::from(Span::styled(
-                format!(
-                    "{:>width$} ",
-                    theme::price(value),
-                    width = AXIS_WIDTH as usize - 1
-                ),
+                format!("{:>width$} ", fmt(value), width = AXIS_WIDTH as usize - 1),
                 theme::label_style(),
             ))
         })
@@ -600,17 +610,21 @@ fn draw_price_axis(f: &mut Frame, area: Rect, lo: f64, hi: f64) {
     f.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
+/// How many rows under the plot the date labels take.
+///
+/// Zero on a panel too short to spare one: on a cramped terminal the prices
+/// matter more than the dates, and a chart squeezed into three rows has nothing
+/// to say about either.
+fn date_rows(plot: Rect) -> u16 {
+    u16::from(plot.height >= 4)
+}
+
 /// Date labels along the bottom of the plot, spaced to avoid collisions.
 fn draw_date_labels(f: &mut Frame, area: Rect, bars: &[Bar], buckets: &[Bucket]) {
-    if area.height < 2 || buckets.is_empty() {
+    if area.height == 0 || buckets.is_empty() {
         return;
     }
-    let row = Rect {
-        x: area.x,
-        y: area.y + area.height - 1,
-        width: area.width,
-        height: 1,
-    };
+    let row = Rect { height: 1, ..area };
 
     // "YYYY-MM-DD" plus breathing room, so labels never abut.
     const LABEL_WIDTH: usize = 10;
@@ -783,7 +797,12 @@ fn draw_pane(f: &mut Frame, area: Rect, app: &App, bars: &[Bar]) {
         ),
     };
 
-    draw_price_axis(f, axis_area, bounds.0, bounds.1);
+    // Volume is counted in shares, not quoted in rupees.
+    let axis_fmt: fn(f64) -> String = match app.chart.pane {
+        Pane::Volume => theme::compact,
+        _ => theme::price,
+    };
+    draw_price_axis(f, axis_area, bounds.0, bounds.1, axis_fmt);
 
     let n = buckets.len().max(1);
     let art = PaneArt {
@@ -1198,7 +1217,7 @@ mod tests {
             hi: 30.0,
         };
         let mut plot = Plot::new(
-            Image::new(100, 90, Color::Rgb(0, 0, 0)),
+            Image::new(100, 90, Some(Color::Rgb(0, 0, 0))),
             [0.0, 2.0],
             [0.0, 30.0],
         );
@@ -1206,8 +1225,8 @@ mod tests {
 
         // Column 0 spans x 0..50, column 1 spans 50..100. Price 15 — inside
         // both bodies — is at y = (1 - 15/30) * 90 = 45.
-        let (down_r, _, _) = plot.image.sample(25, 45);
-        let (up_r, up_g, _) = plot.image.sample(75, 45);
+        let (down_r, _, _, _) = plot.image.sample(25, 45);
+        let (up_r, up_g, _, _) = plot.image.sample(75, 45);
         assert!(down_r > 0, "the falling session's body is drawn");
         assert!(
             up_g > up_r,
@@ -1217,7 +1236,7 @@ mod tests {
         // Above the high of both candles there is nothing but background.
         assert_eq!(
             plot.image.sample(25, 5),
-            (0, 0, 0),
+            (0, 0, 0, 255),
             "nothing above the wick"
         );
     }

@@ -175,40 +175,65 @@ fn parse_cell(spec: &str) -> Option<(u16, u16)> {
 
 // --- images --------------------------------------------------------------
 
-/// An RGB bitmap, drawn into with anti-aliased primitives.
+/// An RGBA bitmap, drawn into with anti-aliased primitives.
 ///
 /// Coordinates are `f32` pixels with the origin at the top left, and every
 /// primitive blends by coverage — a wick half a pixel wide still renders, at
 /// half intensity, instead of snapping to a column or vanishing.
+///
+/// Alpha is not decoration. A chart on a theme that defers to the terminal is
+/// drawn on a *transparent* ground, so the user's own background — colour
+/// scheme, transparency, whatever is behind the window — shows through the plot
+/// exactly as it does through the rest of the UI. Compositing then happens in
+/// the terminal, against the real backdrop, rather than here against a guess.
 #[derive(Clone)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
-    /// Three bytes per pixel, row-major. Kitty's `f=24`, so it goes onto the
-    /// wire with no conversion.
+    /// Four bytes per pixel, row-major, straight (non-premultiplied) alpha.
+    /// Kitty's `f=32`, so it goes onto the wire with no conversion.
     px: Vec<u8>,
 }
 
 impl Image {
-    /// A new image of `width` x `height`, flooded with `bg`.
-    pub fn new(width: u32, height: u32, bg: Color) -> Self {
-        let (r, g, b) = rgb(bg);
-        let px = [r, g, b].repeat((width as usize) * (height as usize));
+    /// A new image of `width` x `height`, flooded with `bg` — or left fully
+    /// transparent when the theme defers to the terminal's own background.
+    pub fn new(width: u32, height: u32, bg: Option<Color>) -> Self {
+        let ground = match bg {
+            Some(c) => {
+                let (r, g, b) = rgb(c);
+                [r, g, b, 255]
+            }
+            None => [0, 0, 0, 0],
+        };
+        let px = ground.repeat((width as usize) * (height as usize));
         Self { width, height, px }
     }
 
-    /// Blend `color` into one pixel at `coverage` (0..=1).
+    /// Blend `color` into one pixel at `coverage` (0..=1), source-over.
+    ///
+    /// Straight alpha throughout: over an opaque ground this is the plain
+    /// lerp it always was, and over a transparent one it accumulates coverage
+    /// so an anti-aliased edge stays translucent instead of being flattened
+    /// against a background that is not there.
     #[inline]
     fn blend(&mut self, x: i32, y: i32, color: (u8, u8, u8), coverage: f32) {
         if coverage <= 0.0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
         }
-        let a = coverage.min(1.0);
-        let i = ((y as usize) * (self.width as usize) + x as usize) * 3;
-        for (k, c) in [color.0, color.1, color.2].into_iter().enumerate() {
-            let old = self.px[i + k] as f32;
-            self.px[i + k] = (old + (c as f32 - old) * a).round().clamp(0.0, 255.0) as u8;
+        let sa = coverage.min(1.0);
+        let i = ((y as usize) * (self.width as usize) + x as usize) * 4;
+        let da = self.px[i + 3] as f32 / 255.0;
+        let out_a = sa + da * (1.0 - sa);
+        if out_a <= 0.0 {
+            return;
         }
+        for (k, c) in [color.0, color.1, color.2].into_iter().enumerate() {
+            let dst = self.px[i + k] as f32;
+            let out = (c as f32 * sa + dst * da * (1.0 - sa)) / out_a;
+            self.px[i + k] = out.round().clamp(0.0, 255.0) as u8;
+        }
+        self.px[i + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
     }
 
     /// Fill an axis-aligned rectangle, anti-aliasing the edges.
@@ -294,12 +319,12 @@ impl Image {
         }
     }
 
-    /// The colour of one pixel. For tests, and for nothing else — drawing is
-    /// write-only.
+    /// The colour and alpha of one pixel. For tests, and for nothing else —
+    /// drawing is write-only.
     #[cfg(test)]
-    pub fn sample(&self, x: u32, y: u32) -> (u8, u8, u8) {
-        let i = ((y as usize) * (self.width as usize) + x as usize) * 3;
-        (self.px[i], self.px[i + 1], self.px[i + 2])
+    pub fn sample(&self, x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let i = ((y as usize) * (self.width as usize) + x as usize) * 4;
+        (self.px[i], self.px[i + 1], self.px[i + 2], self.px[i + 3])
     }
 
     fn digest(&self) -> u64 {
@@ -619,13 +644,15 @@ fn transmit(out: &mut impl Write, id: u32, img: &Image, area: Rect) -> io::Resul
 
     // `c`/`r` pin the image to exactly the cells the layout gave it, whatever
     // its pixel size — which is what makes the resolution cap safe.
-    // `o=z` marks the payload zlib-compressed; `s`/`v` still describe the
-    // image, not the bytes on the wire.
+    // `f=32` is RGBA: the alpha is what lets a chart sit on the terminal's own
+    // background rather than on one of ours. `o=z` marks the payload
+    // zlib-compressed; `s`/`v` still describe the image, not the bytes on the
+    // wire.
     // `z=-1` puts it under the text, `C=1` stops it moving the cursor, and
     // `q=2` suppresses the terminal's replies, which would otherwise arrive in
     // the middle of the key stream.
     let head = format!(
-        "a=T,f=24,o=z,s={},v={},c={},r={},i={id},z=-1,C=1,q=2",
+        "a=T,f=32,o=z,s={},v={},c={},r={},i={id},z=-1,C=1,q=2",
         img.width, img.height, area.width, area.height
     );
 
@@ -770,16 +797,60 @@ mod tests {
 
     #[test]
     fn an_image_starts_flooded_with_its_background() {
-        let img = Image::new(3, 2, Color::Rgb(1, 2, 3));
-        assert_eq!(img.px.len(), 3 * 2 * 3);
-        assert!(img.px.chunks(3).all(|p| p == [1, 2, 3]));
+        let img = Image::new(3, 2, Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(img.px.len(), 3 * 2 * 4);
+        assert!(
+            img.px.chunks(4).all(|p| p == [1, 2, 3, 255]),
+            "opaque ground"
+        );
+
+        let clear = Image::new(3, 2, None);
+        assert!(
+            clear.px.chunks(4).all(|p| p[3] == 0),
+            "a deferring theme leaves the terminal showing through"
+        );
+    }
+
+    /// The whole point of the alpha channel: on a theme that defers to the
+    /// terminal, the plot must not lay a rectangle of "background" over the
+    /// user's own — transparency, blur and all — and the strokes drawn into it
+    /// must still be solid.
+    #[test]
+    fn a_transparent_ground_stays_transparent_where_nothing_is_drawn() {
+        let mut img = Image::new(8, 8, None);
+        img.fill_rect(2.0, 2.0, 2.0, 2.0, Color::Rgb(255, 255, 255));
+
+        assert_eq!(img.sample(0, 0).3, 0, "untouched pixels stay clear");
+        assert_eq!(
+            img.sample(2, 2),
+            (255, 255, 255, 255),
+            "and what is drawn is fully opaque"
+        );
+    }
+
+    /// An anti-aliased edge over a transparent ground carries partial alpha
+    /// rather than being flattened against a background that is not there —
+    /// that is what lets the terminal do the compositing against the real
+    /// backdrop.
+    #[test]
+    fn a_soft_edge_over_nothing_keeps_its_coverage() {
+        let mut img = Image::new(4, 4, None);
+        img.fill_rect(1.0, 1.0, 0.5, 1.0, Color::Rgb(255, 255, 255));
+
+        let (r, g, b, a) = img.sample(1, 1);
+        assert!((0..255).contains(&a) && a > 0, "partial coverage: {a}");
+        assert_eq!(
+            (r, g, b),
+            (255, 255, 255),
+            "the colour is the stroke's, not a blend with a fake background"
+        );
     }
 
     #[test]
     fn a_filled_rectangle_lands_where_it_was_asked_to() {
-        let mut img = Image::new(8, 8, Color::Rgb(0, 0, 0));
+        let mut img = Image::new(8, 8, Some(Color::Rgb(0, 0, 0)));
         img.fill_rect(2.0, 3.0, 2.0, 2.0, Color::Rgb(255, 255, 255));
-        let at = |x: usize, y: usize| img.px[(y * 8 + x) * 3];
+        let at = |x: usize, y: usize| img.px[(y * 8 + x) * 4];
         assert_eq!(at(2, 3), 255);
         assert_eq!(at(3, 4), 255);
         assert_eq!(at(1, 3), 0, "nothing spills to the left");
@@ -791,18 +862,18 @@ mod tests {
     /// leave a mark rather than rounding away to nothing.
     #[test]
     fn a_sub_pixel_rectangle_still_renders() {
-        let mut img = Image::new(4, 4, Color::Rgb(0, 0, 0));
+        let mut img = Image::new(4, 4, Some(Color::Rgb(0, 0, 0)));
         img.fill_rect(1.25, 1.0, 0.5, 1.0, Color::Rgb(255, 255, 255));
-        let at = |x: usize, y: usize| img.px[(y * 4 + x) * 3];
+        let at = |x: usize, y: usize| img.px[(y * 4 + x) * 4];
         assert!(at(1, 1) > 0, "a half-pixel wide body must be visible");
         assert!(at(1, 1) < 255, "and drawn at partial coverage");
     }
 
     #[test]
     fn a_stroke_covers_its_endpoints_and_stays_inside_the_image() {
-        let mut img = Image::new(16, 16, Color::Rgb(0, 0, 0));
+        let mut img = Image::new(16, 16, Some(Color::Rgb(0, 0, 0)));
         img.stroke_line(1.5, 1.5, 14.5, 14.5, 1.5, Color::Rgb(255, 255, 255));
-        let at = |x: usize, y: usize| img.px[(y * 16 + x) * 3];
+        let at = |x: usize, y: usize| img.px[(y * 16 + x) * 4];
         assert!(at(1, 1) > 100, "the start of the line is drawn");
         assert!(at(14, 14) > 100, "and so is the end");
         assert!(at(8, 8) > 100, "and the middle of the diagonal");
@@ -811,16 +882,20 @@ mod tests {
 
     #[test]
     fn drawing_outside_the_image_is_clipped_not_panicked() {
-        let mut img = Image::new(4, 4, Color::Rgb(0, 0, 0));
+        let mut img = Image::new(4, 4, Some(Color::Rgb(0, 0, 0)));
         img.stroke_line(-50.0, -50.0, 100.0, 100.0, 3.0, Color::Rgb(255, 0, 0));
         img.fill_rect(-10.0, -10.0, 100.0, 100.0, Color::Rgb(0, 255, 0));
         img.dot(-5.0, -5.0, 20.0, Color::Rgb(0, 0, 255));
-        assert_eq!(img.px.len(), 4 * 4 * 3);
+        assert_eq!(img.px.len(), 4 * 4 * 4);
     }
 
     #[test]
     fn a_plot_maps_data_to_pixels_with_y_flipped() {
-        let plot = Plot::new(Image::new(100, 50, Color::Reset), [0.0, 10.0], [0.0, 100.0]);
+        let plot = Plot::new(
+            Image::new(100, 50, Some(Color::Reset)),
+            [0.0, 10.0],
+            [0.0, 100.0],
+        );
         assert_eq!(plot.px(0.0), 0.0);
         assert_eq!(plot.px(10.0), 100.0);
         assert_eq!(plot.px(5.0), 50.0);
@@ -831,7 +906,11 @@ mod tests {
 
     #[test]
     fn a_flat_series_still_gets_an_axis() {
-        let plot = Plot::new(Image::new(10, 10, Color::Reset), [0.0, 1.0], [5.0, 5.0]);
+        let plot = Plot::new(
+            Image::new(10, 10, Some(Color::Reset)),
+            [0.0, 1.0],
+            [5.0, 5.0],
+        );
         let y = plot.py(5.0);
         assert!(y.is_finite(), "a flat range must not divide by zero");
         assert!((y - 5.0).abs() < 1.0, "and should sit mid-plot");
@@ -874,14 +953,14 @@ mod tests {
             });
         };
 
-        submit(&mut st, Image::new(4, 4, Color::Rgb(1, 2, 3)));
+        submit(&mut st, Image::new(4, 4, Some(Color::Rgb(1, 2, 3))));
         flush(&mut st, &mut out).unwrap();
         let first = String::from_utf8(out.clone()).unwrap();
         assert!(
             first.contains("\x1b[3;5H"),
             "the cursor moves to the area's top-left cell first: {first:?}"
         );
-        assert!(first.contains("a=T,f=24,o=z,s=4,v=4,c=10,r=6"));
+        assert!(first.contains("a=T,f=32,o=z,s=4,v=4,c=10,r=6"));
         assert!(
             first.contains("z=-1") && first.contains("C=1") && first.contains("q=2"),
             "under the text, without moving the cursor, and without a reply"
@@ -890,21 +969,21 @@ mod tests {
 
         // An unchanged frame must not put the image back on the wire.
         out.clear();
-        submit(&mut st, Image::new(4, 4, Color::Rgb(1, 2, 3)));
+        submit(&mut st, Image::new(4, 4, Some(Color::Rgb(1, 2, 3))));
         flush(&mut st, &mut out).unwrap();
         assert!(out.is_empty(), "an unchanged slot is not re-sent");
 
         // Different pixels, same slot: re-sent, and the stale placement is
         // dropped first so the two do not stack.
         out.clear();
-        submit(&mut st, Image::new(4, 4, Color::Rgb(9, 9, 9)));
+        submit(&mut st, Image::new(4, 4, Some(Color::Rgb(9, 9, 9))));
         flush(&mut st, &mut out).unwrap();
         let redrawn = String::from_utf8(out.clone()).unwrap();
         assert!(
             redrawn.starts_with("\x1b_Ga=d,d=i,i="),
             "deleted, then sent"
         );
-        assert!(redrawn.contains("a=T,f=24"));
+        assert!(redrawn.contains("a=T,f=32"));
 
         // A frame that draws no chart takes the placement away with it.
         out.clear();
@@ -923,7 +1002,7 @@ mod tests {
         let mut out = Vec::new();
         // Noise, because a flat image compresses down to a single chunk — the
         // point of the test is the chunking, not the payload.
-        let mut img = Image::new(120, 120, Color::Rgb(0, 0, 0));
+        let mut img = Image::new(120, 120, Some(Color::Rgb(0, 0, 0)));
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         for b in img.px.iter_mut() {
             seed ^= seed << 13;

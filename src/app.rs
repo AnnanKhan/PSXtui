@@ -643,10 +643,43 @@ impl ChartStyle {
         }
     }
 
-    pub fn next(&self) -> ChartStyle {
-        let i = Self::ALL.iter().position(|s| s == self).unwrap_or(0);
-        Self::ALL[(i + 1) % Self::ALL.len()]
+    /// Whether `c` should stop on this style when charts are drawn as
+    /// `images`.
+    ///
+    /// Dots is a compatibility style: it draws the close line in braille for a
+    /// terminal or font that renders half-blocks badly, at the cost of looking
+    /// like a dotted trail. Where charts are drawn as images there are no cell
+    /// glyphs involved at all, so Dots comes out pixel-for-pixel identical to
+    /// Line — a step in the cycle that appears to do nothing. It stays in
+    /// [`ChartStyle::ALL`] either way, so a session already on it keeps
+    /// rendering, and a terminal that falls back to glyphs still offers it.
+    fn offered(&self, images: bool) -> bool {
+        !images || *self != ChartStyle::Dots
     }
+
+    /// The next style `c` should land on.
+    ///
+    /// Takes the renderer rather than reading it, so the cycle can be tested
+    /// for both kinds of terminal on any machine.
+    pub fn next(&self, images: bool) -> ChartStyle {
+        let start = Self::ALL.iter().position(|s| s == self).unwrap_or(0);
+        for step in 1..=Self::ALL.len() {
+            let candidate = Self::ALL[(start + step) % Self::ALL.len()];
+            if candidate.offered(images) {
+                return candidate;
+            }
+        }
+        // Unreachable: Candles is always offered.
+        *self
+    }
+}
+
+/// Whether this terminal draws charts as images rather than cell glyphs.
+///
+/// Key handling needs it in one place only — the chart-style cycle, where a
+/// style that exists for the glyph renderer has nothing to offer.
+fn images() -> bool {
+    crate::ui::gfx::enabled()
 }
 
 /// The most symbols the Compare screen will overlay at once.
@@ -1696,7 +1729,7 @@ impl App {
             Target::Help => self.show_help = true,
             Target::Quit => self.should_quit = true,
 
-            Target::ChartStyle => self.chart.style = self.chart.style.next(),
+            Target::ChartStyle => self.chart.style = self.chart.style.next(images()),
             Target::ChartPane => {
                 let i = Pane::ALL
                     .iter()
@@ -2097,7 +2130,7 @@ impl App {
             // `k` for kumo — the Ichimoku cloud.
             KeyCode::Char('k') => self.chart.show_ichimoku = !self.chart.show_ichimoku,
             KeyCode::Char('v') => self.chart.show_levels = !self.chart.show_levels,
-            KeyCode::Char('c') => self.chart.style = self.chart.style.next(),
+            KeyCode::Char('c') => self.chart.style = self.chart.style.next(images()),
             _ => {}
         }
     }
@@ -3818,14 +3851,17 @@ exit = "close < fast"
         a.screen = Screen::Chart;
         assert_eq!(a.chart.style, ChartStyle::Candles);
 
-        for expected in [
-            ChartStyle::Line,
-            ChartStyle::Dots,
-            ChartStyle::Area,
-            ChartStyle::Candles,
-        ] {
+        // Dots is only in the cycle on a terminal drawing with glyphs, so the
+        // expected sequence is the one this machine's terminal would show.
+        let mut expected = vec![ChartStyle::Line];
+        if !images() {
+            expected.push(ChartStyle::Dots);
+        }
+        expected.extend([ChartStyle::Area, ChartStyle::Candles]);
+
+        for style in expected {
             a.on_key(key('c'));
-            assert_eq!(a.chart.style, expected);
+            assert_eq!(a.chart.style, style);
         }
     }
 
@@ -3843,15 +3879,36 @@ exit = "close < fast"
 
     #[test]
     fn every_chart_style_is_reachable_by_cycling() {
+        // With glyphs, every style has a distinct look and must be reachable.
         let mut seen = vec![ChartStyle::Candles];
         let mut s = ChartStyle::Candles;
         for _ in 0..ChartStyle::ALL.len() {
-            s = s.next();
+            s = s.next(false);
             seen.push(s);
         }
         for style in ChartStyle::ALL {
             assert!(seen.contains(&style), "{style:?} is unreachable");
         }
+        assert_eq!(s, ChartStyle::Candles, "and the cycle comes back round");
+    }
+
+    /// With images, Dots would render exactly as Line does, so the cycle skips
+    /// it rather than offering a key press that changes nothing.
+    #[test]
+    fn the_image_renderer_leaves_the_compatibility_style_out_of_the_cycle() {
+        let mut seen = Vec::new();
+        let mut s = ChartStyle::Candles;
+        for _ in 0..ChartStyle::ALL.len() {
+            s = s.next(true);
+            seen.push(s);
+        }
+        assert!(!seen.contains(&ChartStyle::Dots), "dots: {seen:?}");
+        assert!(seen.contains(&ChartStyle::Line));
+        assert!(seen.contains(&ChartStyle::Area));
+        assert!(seen.contains(&ChartStyle::Candles), "and it still wraps");
+
+        // A session already on Dots keeps working and cycles out of it.
+        assert_eq!(ChartStyle::Dots.next(true), ChartStyle::Area);
     }
 
     fn click(a: &mut App, x: u16, y: u16) {
@@ -4406,7 +4463,7 @@ exit = "close < fast"
         put(&a, 2, Target::ChartStyle, Zone::Chart);
         let before = a.chart.style;
         click(&mut a, 3, 2);
-        assert_eq!(a.chart.style, before.next());
+        assert_eq!(a.chart.style, before.next(images()));
     }
 
     #[test]

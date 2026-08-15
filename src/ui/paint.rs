@@ -101,8 +101,10 @@ pub fn begin(area: Rect, x_bounds: [f64; 2], y_bounds: [f64; 2]) -> Option<Plot>
         return None;
     }
     let (w, h) = gfx::image_size(area)?;
+    // A theme that defers to the terminal gets a transparent ground, so the
+    // plot shows whatever the rest of the UI shows through it.
     Some(Plot::new(
-        Image::new(w, h, theme::palette().bg),
+        Image::new(w, h, theme::ground()),
         x_bounds,
         y_bounds,
     ))
@@ -111,10 +113,13 @@ pub fn begin(area: Rect, x_bounds: [f64; 2], y_bounds: [f64; 2]) -> Option<Plot>
 /// Hand a finished chart to the terminal.
 ///
 /// The cells underneath are blanked in the same pass: the image is placed below
-/// the text layer, so anything ratatui left there would show through it.
+/// the text layer, so anything ratatui left there would show through it. They
+/// are blanked to the *screen's* background — which for a deferring theme is
+/// the terminal's own — because the image is drawn above the cell background,
+/// and painting a colour there would show through a transparent chart.
 pub fn finish(f: &mut Frame, slot: &'static str, area: Rect, plot: Plot) {
     f.render_widget(
-        ratatui::widgets::Block::default().style(Style::new().bg(theme::palette().bg)),
+        ratatui::widgets::Block::default().style(theme::screen_style()),
         area,
     );
     gfx::submit(slot, area, plot.image);
@@ -126,7 +131,7 @@ mod tests {
 
     fn plot(w: u32, h: u32) -> Plot {
         Plot::new(
-            Image::new(w, h, Color::Rgb(0, 0, 0)),
+            Image::new(w, h, Some(Color::Rgb(0, 0, 0))),
             [0.0, 10.0],
             [0.0, 100.0],
         )

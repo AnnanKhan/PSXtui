@@ -137,15 +137,27 @@ pub fn heat_color(pct: f64, max_abs: f64) -> Color {
         return theme::flat();
     }
     let t = (pct.abs() / max_abs).clamp(0.0, 1.0);
-    // Blend from the neutral panel tone toward the up/down hue.
-    let (r0, g0, b0) = (48u8, 54u8, 61u8);
-    let (r1, g1, b1) = if pct >= 0.0 {
-        (63u8, 185u8, 80u8)
+    // Blend from the theme's neutral panel tone toward its up/down hue, so the
+    // heatmap belongs to whichever palette is active rather than to the one it
+    // was written against.
+    let (r0, g0, b0) = rgb(theme::border());
+    let (r1, g1, b1) = rgb(if pct >= 0.0 {
+        theme::up()
     } else {
-        (248u8, 81u8, 73u8)
-    };
+        theme::down()
+    });
     let mix = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
     Color::Rgb(mix(r0, r1), mix(g0, g1), mix(b0, b1))
+}
+
+/// A palette colour's components. Every palette entry is `Color::Rgb`; anything
+/// else could only arrive from a caller outside the theme, and grey is a
+/// harmless answer for it.
+fn rgb(c: Color) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (128, 128, 128),
+    }
 }
 
 /// Centred placeholder for a panel with nothing to show yet.
@@ -210,10 +222,11 @@ mod tests {
 
     #[test]
     fn heat_colour_saturates_toward_the_sign_hue() {
-        assert_eq!(heat_color(10.0, 10.0), Color::Rgb(63, 185, 80));
-        assert_eq!(heat_color(-10.0, 10.0), Color::Rgb(248, 81, 73));
-        // Zero change stays at the neutral panel tone.
-        assert_eq!(heat_color(0.0, 10.0), Color::Rgb(48, 54, 61));
+        // Full saturation lands exactly on the theme's own up/down hues, and
+        // no change stays at its panel tone — whichever theme is active.
+        assert_eq!(heat_color(10.0, 10.0), theme::up());
+        assert_eq!(heat_color(-10.0, 10.0), theme::down());
+        assert_eq!(heat_color(0.0, 10.0), theme::border());
         assert_eq!(heat_color(f64::NAN, 10.0), theme::flat());
     }
 }

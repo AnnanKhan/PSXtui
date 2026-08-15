@@ -52,6 +52,91 @@ pub fn day_close_ts(day: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// The widest a single session's high/low may be and still be believable, as a
+/// ratio.
+///
+/// PSX runs circuit breakers on the ready market, so a scrip cannot double or
+/// halve between two prints, let alone inside one session. A bar whose range is
+/// wider than this did not happen: its extremes are quoted on a different price
+/// basis from its close. Set well past any real session so that a genuinely
+/// violent day — a new listing, a resumption after suspension — is never
+/// mistaken for corrupt data.
+const MAX_SESSION_RANGE: f64 = 2.0;
+
+/// What a completed `/historical` snapshot is marked with.
+///
+/// Versioned, because the marker also answers "is there anything left to fetch
+/// for this day": snapshots read before the cache kept raw closes left no way
+/// to reconcile an adjusted series, so bumping this asks the deep backfill
+/// ([`Store::days_missing_true_range`]) to read them again. Holidays are marked
+/// `empty` and never re-read whatever this says — there is nothing there.
+const SNAPSHOT_MARK: &str = "2";
+
+/// Put a bar's open/high/low onto the same price basis as its close.
+///
+/// PSX publishes the same session through two feeds that do not agree.
+/// `/timeseries/eod` gives a close adjusted for corporate actions beside an
+/// *unadjusted* open; `/historical` is unadjusted throughout. Merge them
+/// naively and a scrip that has since split eleven-for-one gets bars whose open
+/// is eleven times their close — candles that span the whole plot and a y-axis
+/// scaled to a price the scrip never traded at.
+///
+/// The close is the value to keep: it is the one that stays continuous across a
+/// split, and the one today's quote agrees with. So:
+///
+/// * With the snapshot's raw close on hand, the ratio between the two closes
+///   *is* the adjustment factor for that session. Scaling open/high/low by it
+///   is exact — the range keeps its true shape and lands around the right
+///   price.
+/// * Without it, there is nothing to compute a factor from. A bar that is
+///   internally impossible is reduced to its close, which says "this session
+///   closed here, its range is unknown" — the truth — rather than inventing a
+///   range from values on the wrong basis.
+///
+/// A bar that is already consistent is left exactly as it is, which is almost
+/// all of them: adjustments are rare and only reach back past the last one.
+fn reconcile(bar: &mut Bar, close_raw: Option<f64>) {
+    if !bar.close.is_finite() || bar.close <= 0.0 {
+        return;
+    }
+
+    if let Some(raw) = close_raw
+        && raw.is_finite()
+        && raw > 0.0
+    {
+        let factor = bar.close / raw;
+        // Exactly 1.0 for every session not behind a corporate action, which
+        // is the common case; skip the arithmetic and any float drift with it.
+        if (factor - 1.0).abs() > f64::EPSILON {
+            bar.open *= factor;
+            bar.high *= factor;
+            bar.low *= factor;
+        }
+        return;
+    }
+
+    if !plausible(bar) {
+        bar.open = bar.close;
+        bar.high = bar.close;
+        bar.low = bar.close;
+    }
+}
+
+/// Whether a bar's own numbers can describe one session.
+fn plausible(bar: &Bar) -> bool {
+    let all_finite = [bar.open, bar.high, bar.low, bar.close]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0);
+    if !all_finite {
+        return false;
+    }
+    // The close must sit inside the range, and the range must be a range a
+    // session could actually have travelled.
+    bar.low <= bar.open.min(bar.close)
+        && bar.high >= bar.open.max(bar.close)
+        && bar.high <= bar.low * MAX_SESSION_RANGE
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
 }
@@ -105,6 +190,12 @@ impl Store {
                 -- 1 when high/low came from the /historical snapshot and are
                 -- the true intraday extremes; 0 when derived from open/close.
                 hl_known    INTEGER NOT NULL DEFAULT 0,
+                -- The unadjusted close from the /historical snapshot, kept
+                -- beside the adjusted one the EOD feed supplies. The ratio of
+                -- the two is the corporate-action factor for that session,
+                -- which is what puts open/high/low on the same basis as the
+                -- close. NULL until a snapshot for the day has been read.
+                close_raw   REAL,
                 PRIMARY KEY (symbol, day)
             );
             CREATE INDEX IF NOT EXISTS idx_bars_symbol_ts ON bars (symbol, ts);
@@ -137,6 +228,13 @@ impl Store {
             "#,
         )
         .context("initialising cache schema")?;
+
+        // Caches created before the adjusted-close reconciliation have no
+        // `close_raw`. Adding it is the whole migration: the column is
+        // nullable, and a NULL means "no snapshot read for this session yet",
+        // which is exactly the state such a row is in. SQLite has no
+        // ADD COLUMN IF NOT EXISTS, so the second run's error is the check.
+        let _ = conn.execute("ALTER TABLE bars ADD COLUMN close_raw REAL", []);
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -232,23 +330,30 @@ impl Store {
 
     /// Store a whole-market `/historical` snapshot for one trading day.
     ///
-    /// This is the authoritative source for intraday extremes and always wins.
+    /// This is the authoritative source for intraday extremes and always wins
+    /// on open/high/low — but never on the close. The snapshot is unadjusted
+    /// throughout, while the EOD feed's close is adjusted for corporate
+    /// actions; the adjusted one is the series that stays continuous across a
+    /// split and the one the live quote agrees with, so an existing close is
+    /// left alone and the raw one is kept beside it in `close_raw`. That pair
+    /// is what [`Store::bars`] uses to put the range on the close's basis.
     pub fn put_historical(&self, day: &str, rows: &[HistoricalRow]) -> Result<()> {
         let ts = day_close_ts(day);
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO bars (symbol, day, ts, open, high, low, close, volume, hl_known)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+                "INSERT INTO bars
+                     (symbol, day, ts, open, high, low, close, volume, hl_known, close_raw)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?7)
                  ON CONFLICT(symbol, day) DO UPDATE SET
                     ts       = excluded.ts,
                     open     = excluded.open,
                     high     = excluded.high,
                     low      = excluded.low,
-                    close    = excluded.close,
                     volume   = excluded.volume,
-                    hl_known = 1",
+                    hl_known = 1,
+                    close_raw = excluded.close_raw",
             )?;
             for r in rows {
                 stmt.execute(params![
@@ -258,7 +363,7 @@ impl Store {
             tx.execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![format!("historical:{day}"), "1"],
+                params![format!("historical:{day}"), SNAPSHOT_MARK],
             )?;
         }
         tx.commit()?;
@@ -267,28 +372,33 @@ impl Store {
 
     /// Read a symbol's bars oldest-first, optionally limited to the most
     /// recent `limit` sessions.
+    ///
+    /// Every bar comes back reconciled — see [`reconcile`] — so no caller has
+    /// to know that PSX's two feeds quote different price bases.
     pub fn bars(&self, symbol: &str, limit: Option<usize>) -> Result<Vec<Bar>> {
         let conn = self.conn.lock().unwrap();
         let sql = match limit {
             Some(_) => {
-                "SELECT ts, open, high, low, close, volume FROM bars
+                "SELECT ts, open, high, low, close, volume, close_raw FROM bars
                  WHERE symbol = ?1 ORDER BY day DESC LIMIT ?2"
             }
             None => {
-                "SELECT ts, open, high, low, close, volume FROM bars
+                "SELECT ts, open, high, low, close, volume, close_raw FROM bars
                  WHERE symbol = ?1 ORDER BY day ASC"
             }
         };
         let mut stmt = conn.prepare(sql)?;
         let map = |r: &rusqlite::Row| {
-            Ok(Bar {
+            let mut bar = Bar {
                 ts: r.get(0)?,
                 open: r.get(1)?,
                 high: r.get(2)?,
                 low: r.get(3)?,
                 close: r.get(4)?,
                 volume: r.get(5)?,
-            })
+            };
+            reconcile(&mut bar, r.get(6)?);
+            Ok(bar)
         };
 
         let mut bars: Vec<Bar> = match limit {
@@ -307,6 +417,9 @@ impl Store {
     }
 
     /// Most recent cached trading day for a symbol, if any.
+    ///
+    /// Unreconciled by design: this is a bookkeeping question about what has
+    /// been fetched, not a price.
     pub fn last_day(&self, symbol: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let day: Option<String> = conn
@@ -320,9 +433,16 @@ impl Store {
         Ok(day)
     }
 
-    /// Whether the whole-market snapshot for `day` has already been ingested.
+    /// Whether the whole-market snapshot for `day` has already been ingested,
+    /// completely enough for what the cache now keeps.
+    ///
+    /// A day read by an older version counts as unread, so the rolling startup
+    /// backfill repairs its own window without anyone asking — see
+    /// [`SNAPSHOT_MARK`]. A holiday stays read: there is nothing to re-read.
     pub fn has_historical(&self, day: &str) -> Result<bool> {
-        Ok(self.get_meta(&format!("historical:{day}"))?.is_some())
+        Ok(self
+            .get_meta(&format!("historical:{day}"))?
+            .is_some_and(|mark| mark == SNAPSHOT_MARK || mark == "empty"))
     }
 
     /// Whether a day is known to have traded, judged by the EOD series.
@@ -369,11 +489,11 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT b.day FROM bars b
              LEFT JOIN meta m ON m.key = 'historical:' || b.day
-             WHERE m.key IS NULL
+             WHERE m.key IS NULL OR m.value NOT IN (?1, 'empty')
              ORDER BY b.day DESC",
         )?;
         let days = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
+            .query_map(params![SNAPSHOT_MARK], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(days)
     }
@@ -587,6 +707,127 @@ mod tests {
         }
     }
 
+    // -- reconciling the two feeds' price bases -----------------------------
+
+    /// The real numbers that provoked this: STL on 2026-03-19, which PSX
+    /// reported through `/historical` as 1267.00 / 1390.00 / 1150.00 / 1379.35
+    /// and through the EOD feed as a close of 125.39 — the same session, before
+    /// and after an eleven-for-one adjustment.
+    #[test]
+    fn a_snapshot_range_is_scaled_onto_the_adjusted_close() {
+        let mut b = bar(0, 1267.0, 1390.0, 1150.0, 125.39, 2378.0);
+        reconcile(&mut b, Some(1379.35));
+
+        assert!(
+            plausible(&b),
+            "the reconciled bar must describe one session"
+        );
+        assert_eq!(b.close, 125.39, "the adjusted close is never touched");
+        // The factor is 125.39 / 1379.35 ≈ 0.0909.
+        assert!((b.open - 115.17).abs() < 0.01, "open: {}", b.open);
+        assert!((b.high - 126.35).abs() < 0.01, "high: {}", b.high);
+        assert!((b.low - 104.54).abs() < 0.01, "low: {}", b.low);
+        // The shape of the session survives the move.
+        assert!(
+            ((b.high / b.low) - (1390.0 / 1150.0)).abs() < 1e-9,
+            "the range kept its proportions"
+        );
+    }
+
+    #[test]
+    fn a_bar_on_one_basis_passes_through_untouched() {
+        let before = bar(0, 41.71, 42.90, 41.30, 41.73, 209_549.0);
+        let mut after = before;
+        // Same close in both feeds: nothing was adjusted, factor is 1.
+        reconcile(&mut after, Some(41.73));
+        assert_eq!(after, before);
+
+        let mut after = before;
+        reconcile(&mut after, None);
+        assert_eq!(after, before, "and with no snapshot read either");
+    }
+
+    /// The EOD feed alone gives an adjusted close beside an unadjusted open,
+    /// and there is nothing in the row to compute a factor from. An eleven-fold
+    /// candle is worse than no candle.
+    #[test]
+    fn an_impossible_bar_with_no_factor_keeps_only_its_close() {
+        // open/high derived from the raw open, low/close from the adjusted one.
+        let mut b = bar(0, 1267.0, 1267.0, 125.39, 125.39, 2378.0);
+        reconcile(&mut b, None);
+
+        assert_eq!(
+            (b.open, b.high, b.low, b.close),
+            (125.39, 125.39, 125.39, 125.39),
+            "the session closed here; its range is unknown"
+        );
+        assert_eq!(b.volume, 2378.0, "volume is unaffected by any of this");
+    }
+
+    #[test]
+    fn a_close_outside_its_own_range_is_not_plausible() {
+        // The state the cache was left in by the two feeds overwriting one
+        // another: a true range from the snapshot, an adjusted close from EOD.
+        assert!(!plausible(&bar(0, 1278.0, 1280.0, 1250.99, 117.72, 10.0)));
+        // A wide but possible session.
+        assert!(plausible(&bar(0, 100.0, 110.0, 95.0, 108.0, 1.0)));
+        // Wider than any circuit breaker allows: not one session's range.
+        assert!(!plausible(&bar(0, 100.0, 300.0, 100.0, 300.0, 1.0)));
+        // Zeroes and NaNs from suspended scrips.
+        assert!(!plausible(&bar(0, 0.0, 0.0, 0.0, 0.0, 0.0)));
+        assert!(!plausible(&bar(0, f64::NAN, 1.0, 1.0, 1.0, 0.0)));
+    }
+
+    /// Reconciliation must not run on a close there is no basis for.
+    #[test]
+    fn a_bar_with_no_usable_close_is_left_for_the_caller_to_reject() {
+        let mut b = bar(0, 10.0, 12.0, 9.0, 0.0, 5.0);
+        reconcile(&mut b, Some(11.0));
+        assert_eq!(b.open, 10.0, "a zero close scales nothing to zero");
+    }
+
+    #[test]
+    fn reconciliation_reaches_the_bars_a_caller_reads() {
+        let s = Store::open_in_memory().unwrap();
+        // The EOD feed lands first, with its adjusted close.
+        s.put_eod_bars(
+            "STL",
+            &[bar(
+                day_close_ts("2026-03-19"),
+                1267.0,
+                1267.0,
+                125.39,
+                125.39,
+                2378.0,
+            )],
+        )
+        .unwrap();
+        // Then the snapshot, unadjusted throughout.
+        s.put_historical(
+            "2026-03-19",
+            &[crate::psx::HistoricalRow {
+                symbol: "STL".into(),
+                ldcp: 1263.84,
+                open: 1267.0,
+                high: 1390.0,
+                low: 1150.0,
+                close: 1379.35,
+                volume: 2378.0,
+            }],
+        )
+        .unwrap();
+
+        let bars = s.bars("STL", None).unwrap();
+        assert_eq!(bars.len(), 1);
+        let b = bars[0];
+        assert_eq!(b.close, 125.39, "the snapshot must not restore a raw close");
+        assert!(
+            plausible(&b),
+            "and the range comes back on that basis: {b:?}"
+        );
+        assert!((b.high - 126.35).abs() < 0.01, "high: {}", b.high);
+    }
+
     // -- true-range coverage ------------------------------------------------
 
     #[test]
@@ -647,6 +888,34 @@ mod tests {
             s.days_missing_true_range().unwrap(),
             vec!["2024-03-11".to_string()]
         );
+    }
+
+    /// A snapshot read by an older version left no raw close behind, so the
+    /// adjustment factor for that session is unrecoverable until it is read
+    /// again. The marker's version is what says so.
+    #[test]
+    fn snapshots_read_before_raw_closes_were_kept_are_offered_again() {
+        let s = Store::open_in_memory().unwrap();
+        s.put_eod_bars(
+            "OGDC",
+            &[bar(day_close_ts("2024-03-12"), 1.0, 1.0, 1.0, 1.0, 10.0)],
+        )
+        .unwrap();
+        s.put_historical("2024-03-12", &[hist("OGDC", 1.0, 1.5, 0.5, 1.2, 10.0)])
+            .unwrap();
+        assert!(s.days_missing_true_range().unwrap().is_empty());
+
+        // Exactly what an older cache holds.
+        s.set_meta("historical:2024-03-12", "1").unwrap();
+        assert_eq!(
+            s.days_missing_true_range().unwrap(),
+            vec!["2024-03-12".to_string()],
+            "an old mark must not pass for a complete snapshot"
+        );
+
+        // A holiday, though, has nothing to re-read however it was marked.
+        s.mark_historical_empty("2024-03-12").unwrap();
+        assert!(s.days_missing_true_range().unwrap().is_empty());
     }
 
     #[test]

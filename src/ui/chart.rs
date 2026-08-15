@@ -1217,7 +1217,7 @@ mod tests {
             hi: 30.0,
         };
         let mut plot = Plot::new(
-            Image::new(100, 90, Color::Rgb(0, 0, 0)),
+            Image::new(100, 90, Some(Color::Rgb(0, 0, 0))),
             [0.0, 2.0],
             [0.0, 30.0],
         );
@@ -1225,8 +1225,8 @@ mod tests {
 
         // Column 0 spans x 0..50, column 1 spans 50..100. Price 15 — inside
         // both bodies — is at y = (1 - 15/30) * 90 = 45.
-        let (down_r, _, _) = plot.image.sample(25, 45);
-        let (up_r, up_g, _) = plot.image.sample(75, 45);
+        let (down_r, _, _, _) = plot.image.sample(25, 45);
+        let (up_r, up_g, _, _) = plot.image.sample(75, 45);
         assert!(down_r > 0, "the falling session's body is drawn");
         assert!(
             up_g > up_r,
@@ -1236,7 +1236,7 @@ mod tests {
         // Above the high of both candles there is nothing but background.
         assert_eq!(
             plot.image.sample(25, 5),
-            (0, 0, 0),
+            (0, 0, 0, 255),
             "nothing above the wick"
         );
     }

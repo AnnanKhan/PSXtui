@@ -212,6 +212,12 @@ The axis labels, prices and dates stay ordinary terminal text drawn *over* the
 image, so they render at whatever hinting your font uses rather than being
 rasterised into the picture.
 
+Charts inherit the theme's ground. Under the default `terminal` theme they are
+drawn on a *transparent* one, so your terminal's own background — colour scheme,
+transparency, whatever is behind the window — shows through the plot exactly as
+it does through the rest of the UI. The app stays seamless with the terminal it
+is running in; it never lays a rectangle of its own background over yours.
+
 Everywhere else — an older terminal, a font without braille, inside tmux or
 screen — the braille canvas is still what runs, and nothing about the app
 changes. The `dots` chart style belongs to that path: it draws the close line in

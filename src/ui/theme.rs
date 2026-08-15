@@ -326,6 +326,28 @@ pub fn sand() -> Color {
     palette().sand
 }
 
+/// The background this theme paints, or `None` when it defers to the
+/// terminal's own.
+///
+/// The default theme defers, and that is the point of it: whatever the terminal
+/// was configured with — a colour scheme, transparency, a blurred desktop
+/// behind it — shows through, and the app sits in it rather than on top of it.
+/// Every other theme owns the background, because a Solarized foreground over
+/// someone else's background is not Solarized.
+///
+/// Charts respect this too: where a theme defers, their bitmaps are rendered on
+/// a transparent ground (see [`super::gfx`]) so the terminal shows through
+/// those as well.
+pub fn ground() -> Option<Color> {
+    let p = palette();
+    p.opaque.then_some(p.bg)
+}
+
+/// The style the whole screen sits on.
+pub fn screen_style() -> Style {
+    Style::new().fg(fg()).bg(ground().unwrap_or(Color::Reset))
+}
+
 /// Colour for a signed change: green up, red down, grey unchanged.
 pub fn change_color(v: f64) -> Color {
     if v > 0.0 {

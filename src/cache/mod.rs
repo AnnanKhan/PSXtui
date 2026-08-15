@@ -167,6 +167,13 @@ impl Store {
         // WAL keeps reads from blocking the background refresh writer.
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
+        // WAL still serialises writers, and nothing stops a second psxtui
+        // running against the same cache. Without a busy timeout SQLite fails
+        // a contended write immediately rather than waiting, and the callers
+        // that discard a write error — the backfill does — would drop the day
+        // silently. Waiting is always the better answer here: every write in
+        // this app is short.
+        conn.busy_timeout(std::time::Duration::from_secs(10)).ok();
 
         conn.execute_batch(
             r#"

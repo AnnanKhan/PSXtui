@@ -1,0 +1,86 @@
+name = "Swing Checklist"
+about = "Buy a pullback inside a confirmed uptrend, but only when all five checks agree: price above a flat-or-rising 200 DMA, a pullback into the 50/200 DMA value zone, RSI exhausted or diverging, a MACD momentum pivot, and a bullish reversal candle on above-average volume. Every check is a veto — four out of five is not a setup."
+source = "A widely-taught discretionary swing-trading checklist (trend / value zone / momentum exhaustion / momentum pivot / price-and-volume trigger), mechanised so it can be measured."
+direction = "long"
+
+# The checklist has no exit rule of its own, which is the usual gap in a
+# discretionary sequence. Structure break is the primary exit; the stop is
+# sized for PSX's ±10% circuit breaker, where a gap to lower lock can hold a
+# position hostage for a session or more and a tight stop is a fiction.
+stop_loss_pct = 9
+take_profit_pct = 20
+min_hold_bars = 3
+
+[params]
+trend = { default = 200, min = 100, max = 250, step = 10, about = "Step 1: primary trend average" }
+slope_lb = { default = 20, min = 5, max = 60, step = 5, about = "Step 1: bars used to judge whether the trend average is flat or rising" }
+value = { default = 50, min = 20, max = 100, step = 5, about = "Step 2: the dynamic support average price pulls back to" }
+zone_pct = { default = 3, min = 0.5, max = 8, step = 0.5, about = "Step 2: how close to an average counts as a retest, in percent" }
+pullback_min = { default = 5, min = 0, max = 20, step = 1, about = "Step 2: minimum fall from the recent high, so a breakout is not mistaken for a dip" }
+high_lb = { default = 60, min = 20, max = 120, step = 10, about = "Step 2: window defining the recent high" }
+rsi_period = { default = 14, min = 5, max = 21, step = 1, about = "Step 3: RSI lookback" }
+oversold = { default = 30, min = 15, max = 45, step = 1, about = "Step 3: oversold threshold" }
+div_window = { default = 10, min = 5, max = 30, step = 1, about = "Step 3: window for the hidden-divergence comparison" }
+recent = { default = 5, min = 1, max = 15, step = 1, about = "Bars within which steps 3 and 4 may have fired — a checklist is a sequence, not one bar" }
+vol_ma = { default = 20, min = 10, max = 50, step = 5, about = "Step 5: volume average" }
+vol_mult = { default = 1, min = 1, max = 3, step = 0.1, about = "Step 5: how far above average volume the trigger bar must trade" }
+overbought = { default = 65, min = 55, max = 85, step = 1, about = "Exit: RSI level counted as the swing having paid out" }
+
+[indicators]
+# --- Step 1: the primary trend -------------------------------------------
+trend_ma = "sma(close, trend)"
+trend_rising = "pct_change(trend_ma, slope_lb) >= 0"
+
+# --- Step 2: the pullback and the value zone -----------------------------
+value_ma = "sma(close, value)"
+recent_high = "highest(high, high_lb)"
+# Distance from each average, as a percentage, measured against the bar's low:
+# a wick into the zone is a retest even if the close recovers away from it.
+dist_value = "abs(low - value_ma) / value_ma * 100"
+dist_trend = "abs(low - trend_ma) / trend_ma * 100"
+in_zone = "min(dist_value, dist_trend) <= zone_pct"
+pulled_back = "close <= recent_high * (1 - pullback_min / 100)"
+
+# --- Step 3: momentum exhaustion -----------------------------------------
+r = "rsi(close, rsi_period)"
+# Hidden bullish divergence: price holds above the prior swing low while RSI
+# undercuts its own. `prev(lowest(x, w), w)` is the extreme of the window that
+# ended `w` bars ago, which is the closest this language gets to a swing point.
+higher_low = "low > prev(lowest(low, div_window), div_window)"
+rsi_lower_low = "r < prev(lowest(r, div_window), div_window)"
+divergence = "higher_low and rsi_lower_low"
+exhausted = "lowest(r, recent) < oversold or highest(divergence, recent) > 0"
+
+# --- Step 4: the momentum pivot ------------------------------------------
+m = "macd(close, 12, 26, 9)"
+sig = "macd_signal(close, 12, 26, 9)"
+hist = "macd_hist(close, 12, 26, 9)"
+# Either the signal-line cross from below zero, or the histogram contracting
+# upward while still negative — the earlier, weaker form of the same turn.
+pivot_cross = "cross_above(m, sig) and m < 0"
+pivot_hist = "hist < 0 and hist > prev(hist, 1)"
+pivoted = "highest(pivot_cross, recent) > 0 or pivot_hist"
+
+# --- Step 5: the price-and-volume trigger --------------------------------
+# Shadow-based patterns need true intraday extremes. Without the `/historical`
+# OHLC backfill (`O` on the Backtest screen) high and low are derived from open
+# and close, and only `bullish_engulfing` stays meaningful.
+reversal_candle = "hammer() or bullish_engulfing() or morning_star()"
+volume_backed = "volume > sma(volume, vol_ma) * vol_mult"
+trigger = "reversal_candle and volume_backed"
+
+[rules]
+# Step 1 is a regime gate rather than a trade condition: while it is false
+# there is no setup to look for at all.
+filter = "close > trend_ma and trend_rising"
+
+# Steps 2 through 5, every one required.
+entry = "pulled_back and in_zone and exhausted and pivoted and trigger"
+
+# Sell into strength, or when the regime that justified the trade ends.
+#
+# Deliberately *not* "close below the value average": entry happens at that
+# average by construction, so such a rule is already near-true on the entry bar
+# and closes every trade within a few sessions. Downside is left to
+# `stop_loss_pct`, which is the only level that does not overlap the entry.
+exit = "r > overbought or close < trend_ma"

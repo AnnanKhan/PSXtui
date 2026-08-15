@@ -74,6 +74,10 @@ pub const BUILTIN: &[(&str, &str)] = &[
         "triple-ma.toml",
         include_str!("../../strategies/triple-ma.toml"),
     ),
+    (
+        "swing-checklist.toml",
+        include_str!("../../strategies/swing-checklist.toml"),
+    ),
 ];
 
 /// Write the bundled strategies into the user's strategy directory.
@@ -140,24 +144,57 @@ mod tests {
     fn bundled_strategies_actually_trade_on_a_realistic_series() {
         // A strategy that parses but never fires is worse than useless as a
         // worked example.
-        let bars: Vec<crate::model::Bar> = (0..900)
-            .map(|i| {
-                let t = i as f64;
-                let c = 100.0
-                    + t * 0.04
-                    + (t / 9.0).sin() * 7.0
-                    + (t / 31.0).cos() * 12.0
-                    + (t / 5.0).sin() * 2.0;
-                crate::model::Bar {
-                    ts: 1_600_000_000 + i as i64 * 86_400,
-                    open: c,
-                    high: c * 1.01,
-                    low: c * 0.99,
-                    close: c,
-                    volume: 100_000.0,
-                }
-            })
-            .collect();
+        //
+        // The bars carry real bodies, real shadows and a varying volume rather
+        // than `open == close` at a flat 100k. A strategy reading candle shape
+        // or a volume average cannot say anything at all about a series that
+        // has neither, so a degenerate fixture would quietly exempt exactly the
+        // strategies this test exists to check.
+        // Bar shape is drawn from a seeded generator rather than from more
+        // sine terms. Sines would stay phase-locked to the price cycle, so a
+        // rule needing a particular candle at a particular point in a pullback
+        // either aligns in the first cycle or never aligns at all, however long
+        // the series runs. A fixed seed keeps the test deterministic.
+        let mut seed: u64 = 0x5eed_1234_9abc_def1;
+        let mut noise = move || {
+            // xorshift64*: a few lines, good enough to decorrelate shape from
+            // phase, and reproducible across platforms.
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+
+        let close_at = |t: f64| {
+            100.0
+                + t * 0.04
+                + (t / 9.0).sin() * 7.0
+                + (t / 31.0).cos() * 12.0
+                + (t / 5.0).sin() * 2.0
+        };
+        let mut bars: Vec<crate::model::Bar> = Vec::with_capacity(1_500);
+        for i in 0..1_500i64 {
+            let t = i as f64;
+            let close = close_at(t);
+            // Opening away from the previous close is what gives the bar a
+            // body, and what lets one bar engulf another.
+            let open = if i == 0 {
+                close
+            } else {
+                close_at(t - 1.0) + (noise() - 0.5) * 2.4
+            };
+            // Independent shadows above and below, so the lopsided shapes
+            // (hammer, star) occur at a plausible rate instead of never.
+            let (hi, lo) = (close.max(open), close.min(open));
+            bars.push(crate::model::Bar {
+                ts: 1_600_000_000 + i * 86_400,
+                open,
+                high: hi + noise().powi(2) * 3.0,
+                low: lo - noise().powi(2) * 3.0,
+                close,
+                volume: 100_000.0 * (0.5 + noise() * 1.5),
+            });
+        }
 
         for (name, body) in BUILTIN {
             let s = Strategy::parse(body).unwrap();

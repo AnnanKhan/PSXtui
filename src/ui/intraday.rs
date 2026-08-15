@@ -10,6 +10,7 @@ use ratatui::prelude::*;
 use ratatui::symbols::Marker;
 use ratatui::widgets::{Axis, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table, Wrap};
 
+use super::paint::{self, Paint};
 use super::{theme, widgets};
 use crate::analysis::indicators::vwap_session;
 use crate::app::App;
@@ -116,18 +117,26 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App) {
     let last_ts = ticks.last().map(|t| t.ts).unwrap_or_default();
     let mid_ts = first_ts + (last_ts - first_ts) / 2;
 
+    // Drawn as an image where the terminal can: a session's tape is thousands
+    // of trades squeezed into a hundred columns, which is exactly where the
+    // extra resolution shows.
+    if draw_price_hd(f, inner, &price_pts, &vwap_pts, (y_lo, y_hi), x_hi) {
+        draw_time_labels(f, inner, [first_ts, mid_ts, last_ts]);
+        return;
+    }
+
     let datasets = vec![
         Dataset::default()
             .name("Price")
             .marker(theme::marker(Marker::Braille))
             .graph_type(GraphType::Line)
-            .style(Style::new().fg(theme::ACCENT))
+            .style(Style::new().fg(theme::accent()))
             .data(&price_pts),
         Dataset::default()
             .name("VWAP")
             .marker(theme::marker(Marker::Braille))
             .graph_type(GraphType::Line)
-            .style(Style::new().fg(theme::WARN))
+            .style(Style::new().fg(theme::warn()))
             .data(&vwap_pts),
     ];
 
@@ -152,8 +161,98 @@ fn draw_price(f: &mut Frame, area: Rect, app: &App) {
         Chart::new(datasets)
             .x_axis(x_axis)
             .y_axis(y_axis)
-            .style(Style::new().fg(theme::FG)),
+            .style(Style::new().fg(theme::fg())),
         inner,
+    );
+}
+
+/// Width of the price gutter in the pixel-rendered session chart, matching the
+/// axis labels ratatui's own `Chart` would have reserved room for.
+const PRICE_GUTTER: u16 = 10;
+
+/// Draw the session chart as an image, returning whether it did.
+///
+/// The axis is laid out here rather than by ratatui's `Chart`, which owns its
+/// own plot rectangle and would leave the image a column or two out of true.
+fn draw_price_hd(
+    f: &mut Frame,
+    inner: Rect,
+    price: &[(f64, f64)],
+    vwap: &[(f64, f64)],
+    (y_lo, y_hi): (f64, f64),
+    x_hi: f64,
+) -> bool {
+    if inner.width <= PRICE_GUTTER + 4 || inner.height < 4 {
+        return false;
+    }
+    let [gutter, plot_area] =
+        Layout::horizontal([Constraint::Length(PRICE_GUTTER), Constraint::Min(0)]).areas(inner);
+    // The bottom row carries the time labels.
+    let plot_area = Rect {
+        height: plot_area.height - 1,
+        ..plot_area
+    };
+
+    let Some(mut plot) = paint::begin(plot_area, [0.0, x_hi], [y_lo, y_hi]) else {
+        return false;
+    };
+    for (points, color) in [(price, theme::accent()), (vwap, theme::warn())] {
+        for w in points.windows(2) {
+            plot.stroke(w[0].0, w[0].1, w[1].0, w[1].1, color);
+        }
+        // A session with a single priced trade still has a level to show.
+        if points.len() == 1 {
+            plot.point(points[0].0, points[0].1, color);
+        }
+    }
+    paint::finish(f, "intraday.price", plot_area, plot);
+
+    // Price labels down the gutter: top, middle, bottom.
+    let rows = plot_area.height;
+    let mut lines: Vec<Line> = vec![Line::raw(""); rows as usize];
+    for (row, value) in [
+        (0usize, y_hi),
+        ((rows / 2) as usize, (y_lo + y_hi) / 2.0),
+        (rows.saturating_sub(1) as usize, y_lo),
+    ] {
+        if let Some(slot) = lines.get_mut(row) {
+            *slot = Line::from(Span::styled(
+                format!(
+                    "{:>width$} ",
+                    theme::price(value),
+                    width = PRICE_GUTTER as usize - 1
+                ),
+                theme::label_style(),
+            ));
+        }
+    }
+    f.render_widget(Paragraph::new(Text::from(lines)), gutter);
+    true
+}
+
+/// Session start, midpoint and end along the bottom of the plot.
+fn draw_time_labels(f: &mut Frame, inner: Rect, stamps: [i64; 3]) {
+    let row = Rect {
+        x: inner.x + PRICE_GUTTER,
+        y: inner.y + inner.height - 1,
+        width: inner.width.saturating_sub(PRICE_GUTTER),
+        height: 1,
+    };
+    if row.width < 15 {
+        return;
+    }
+    let labels: Vec<String> = stamps.iter().map(|ts| pkt_time(*ts, "%H:%M")).collect();
+    let pad = (row.width as usize).saturating_sub(labels.iter().map(|l| l.len()).sum::<usize>());
+    let gap = " ".repeat(pad / 2);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(labels[0].clone(), theme::label_style()),
+            Span::raw(gap.clone()),
+            Span::styled(labels[1].clone(), theme::label_style()),
+            Span::raw(gap),
+            Span::styled(labels[2].clone(), theme::label_style()),
+        ])),
+        row,
     );
 }
 
@@ -282,9 +381,9 @@ fn draw_volume(f: &mut Frame, area: Rect, ticks: &[Tick]) {
                 Span::styled(
                     widgets::bar(ratio, bar_w),
                     Style::new().fg(if b.volume > 0.0 {
-                        theme::VOLUME
+                        theme::volume()
                     } else {
-                        theme::BORDER
+                        theme::border()
                     }),
                 ),
                 Span::styled(

@@ -295,14 +295,14 @@ fn opt_pct(v: Option<f64>) -> String {
 
 fn cell_style(col: Col, q: &Quote, val: Option<&Valuation>) -> Style {
     match col {
-        Col::Symbol => Style::new().fg(theme::FG).bold(),
-        Col::Name | Col::Sector => Style::new().fg(theme::MUTED),
-        Col::Ldcp | Col::Open => Style::new().fg(theme::DIM),
-        Col::High => Style::new().fg(theme::UP),
-        Col::Low => Style::new().fg(theme::DOWN),
-        Col::Current => Style::new().fg(theme::FG),
+        Col::Symbol => Style::new().fg(theme::fg()).bold(),
+        Col::Name | Col::Sector => Style::new().fg(theme::muted()),
+        Col::Ldcp | Col::Open => Style::new().fg(theme::dim()),
+        Col::High => Style::new().fg(theme::up()),
+        Col::Low => Style::new().fg(theme::down()),
+        Col::Current => Style::new().fg(theme::fg()),
         Col::Change | Col::ChangePct => Style::new().fg(theme::change_color(q.change_pct)),
-        Col::Volume | Col::Turnover => Style::new().fg(theme::VOLUME),
+        Col::Volume | Col::Turnover => Style::new().fg(theme::volume()),
 
         // Growth and margin are signed, so they carry the up/down hue; the
         // rest are plain. A missing value stays dim so the eye reads the gap
@@ -311,9 +311,9 @@ fn cell_style(col: Col, q: &Quote, val: Option<&Valuation>) -> Style {
         Col::NetMargin => signed_style(val.and_then(|v| v.net_margin_pct)),
         Col::Pe | Col::Eps | Col::MarketCap | Col::FreeFloat => {
             if val.is_some() {
-                Style::new().fg(theme::FG)
+                Style::new().fg(theme::fg())
             } else {
-                Style::new().fg(theme::DIM)
+                Style::new().fg(theme::dim())
             }
         }
     }
@@ -322,7 +322,7 @@ fn cell_style(col: Col, q: &Quote, val: Option<&Valuation>) -> Style {
 fn signed_style(v: Option<f64>) -> Style {
     match v {
         Some(v) if v.is_finite() => Style::new().fg(theme::change_color(v)),
-        _ => Style::new().fg(theme::DIM),
+        _ => Style::new().fg(theme::dim()),
     }
 }
 
@@ -367,7 +367,7 @@ fn footer(
 ) -> (Line<'static>, Vec<(u16, u16, Toggle)>) {
     let flag = |on: bool| {
         if on {
-            Style::new().fg(theme::WARN).bold()
+            Style::new().fg(theme::warn()).bold()
         } else {
             theme::label_style()
         }
@@ -384,9 +384,9 @@ fn footer(
         groups.push(vec![(
             format!(" {} ", coverage(have, shown)),
             if have < shown {
-                Style::new().fg(theme::WARN).bold()
+                Style::new().fg(theme::warn()).bold()
             } else {
-                Style::new().fg(theme::ACCENT)
+                Style::new().fg(theme::accent())
             },
             None,
         )]);
@@ -404,7 +404,7 @@ fn footer(
                     "▲"
                 }
             ),
-            Style::new().fg(theme::ACCENT),
+            Style::new().fg(theme::accent()),
             Some(Toggle::SortDirection),
         ),
     ]);
@@ -414,7 +414,7 @@ fn footer(
             (" · ".into(), theme::border_style(), None),
             (
                 format!("/{}", theme::truncate(q, 16)),
-                Style::new().fg(theme::ACCENT),
+                Style::new().fg(theme::accent()),
                 None,
             ),
         ]);
@@ -550,7 +550,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 to_cell(
                     header_text(*c, app.screener.sort, app.screener.descending, *w),
                     if c.sort_key() == Some(app.screener.sort) {
-                        Style::new().fg(theme::ACCENT).bold()
+                        Style::new().fg(theme::accent()).bold()
                     } else {
                         theme::header_style()
                     },
@@ -569,7 +569,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 cols.iter()
                     .map(|(c, w)| {
                         let style = if *c == Col::Symbol && app.watchlist.contains(&q.symbol) {
-                            Style::new().fg(theme::WARN).bold()
+                            Style::new().fg(theme::warn()).bold()
                         } else {
                             cell_style(*c, q, val)
                         };
@@ -586,7 +586,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .header(header)
         .column_spacing(1)
         .style(theme::value_style())
-        .row_highlight_style(Style::new().bg(theme::SELECT_BG).bold());
+        .row_highlight_style(Style::new().bg(theme::select_bg()).bold());
 
     // Clamp defensively: the cursor is App's, and a filter change could in
     // principle leave it past the end of the freshly filtered board.

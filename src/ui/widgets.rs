@@ -89,7 +89,7 @@ pub fn sparkline(values: &[f64], width: usize) -> String {
 pub fn sparkline_span(values: &[f64], width: usize) -> Span<'static> {
     let color = match (values.first(), values.last()) {
         (Some(a), Some(b)) => theme::change_color(b - a),
-        _ => theme::FLAT,
+        _ => theme::flat(),
     };
     Span::styled(sparkline(values, width), Style::new().fg(color))
 }
@@ -134,7 +134,7 @@ pub fn bar(ratio: f64, width: usize) -> String {
 /// natural default saturation point.
 pub fn heat_color(pct: f64, max_abs: f64) -> Color {
     if !pct.is_finite() || max_abs <= 0.0 {
-        return theme::FLAT;
+        return theme::flat();
     }
     let t = (pct.abs() / max_abs).clamp(0.0, 1.0);
     // Blend from the neutral panel tone toward the up/down hue.
@@ -214,6 +214,6 @@ mod tests {
         assert_eq!(heat_color(-10.0, 10.0), Color::Rgb(248, 81, 73));
         // Zero change stays at the neutral panel tone.
         assert_eq!(heat_color(0.0, 10.0), Color::Rgb(48, 54, 61));
-        assert_eq!(heat_color(f64::NAN, 10.0), theme::FLAT);
+        assert_eq!(heat_color(f64::NAN, 10.0), theme::flat());
     }
 }

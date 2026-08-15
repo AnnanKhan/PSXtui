@@ -18,10 +18,11 @@
 use std::collections::BTreeMap;
 
 use ratatui::prelude::*;
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
+use ratatui::widgets::canvas::Canvas;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::hit::{Target, Zone};
+use super::paint::{self, Paint};
 use super::{theme, widgets};
 use crate::analysis::stats::{self, TRADING_DAYS_PER_YEAR};
 use crate::app::{App, BENCHMARK, MAX_COMPARE, Range};
@@ -52,17 +53,17 @@ const CHIP_LABEL: &str = " Symbols ";
 /// the four most separable colours first, and the subtler hues are only reached
 /// by a set large enough to need them.
 pub fn series_color(i: usize) -> Color {
-    const PALETTE: [Color; MAX_COMPARE] = [
-        theme::ACCENT,
-        theme::WARN,
-        theme::UP,
-        theme::DOWN,
-        theme::VIOLET,
-        theme::CYAN,
-        theme::PINK,
-        theme::SAND,
+    let palette: [Color; MAX_COMPARE] = [
+        theme::accent(),
+        theme::warn(),
+        theme::up(),
+        theme::down(),
+        theme::violet(),
+        theme::cyan(),
+        theme::pink(),
+        theme::sand(),
     ];
-    PALETTE[i % PALETTE.len()]
+    palette[i % palette.len()]
 }
 
 // --- alignment (the load-bearing logic) ----------------------------------
@@ -436,7 +437,7 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, view: &View) {
     app.hits.borrow_mut().zone(area, Zone::ComparePicker);
 
     let block = Block::bordered()
-        .border_style(Style::new().fg(theme::ACCENT))
+        .border_style(Style::new().fg(theme::accent()))
         .title(Span::styled(" Add to comparison ", theme::title_style()));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -450,9 +451,9 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, view: &View) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" › ", Style::new().fg(theme::ACCENT)),
-            Span::styled(picker.query.clone(), Style::new().fg(theme::FG)),
-            Span::styled("█", Style::new().fg(theme::ACCENT)),
+            Span::styled(" › ", Style::new().fg(theme::accent())),
+            Span::styled(picker.query.clone(), Style::new().fg(theme::fg())),
+            Span::styled("█", Style::new().fg(theme::accent())),
         ])),
         prompt,
     );
@@ -494,12 +495,12 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, view: &View) {
             let mut spans = vec![
                 Span::styled(
                     if picked { " ✓ " } else { "   " },
-                    Style::new().fg(theme::UP),
+                    Style::new().fg(theme::up()),
                 ),
                 Span::styled(
                     format!("{:<9}", theme::truncate(symbol, 9)),
                     Style::new()
-                        .fg(if picked { theme::ACCENT } else { theme::FG })
+                        .fg(if picked { theme::accent() } else { theme::fg() })
                         .bold(),
                 ),
                 Span::styled(
@@ -516,7 +517,7 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, view: &View) {
 
             let mut line = Line::from(spans);
             if selected {
-                line = line.style(Style::new().bg(theme::SELECT_BG));
+                line = line.style(Style::new().bg(theme::select_bg()));
             }
             lines.push(line);
         }
@@ -555,7 +556,7 @@ fn meta_spans(view: &View) -> Vec<Span<'static>> {
     if view.rows.iter().any(|r| !r.cached) {
         spans.push(Span::styled(
             "· missing history ",
-            Style::new().fg(theme::WARN),
+            Style::new().fg(theme::warn()),
         ));
     }
     spans
@@ -620,13 +621,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View, plan: &HeaderP
                         if r.cached {
                             Style::new().fg(r.color).bold()
                         } else {
-                            Style::new().fg(theme::DIM)
+                            Style::new().fg(theme::dim())
                         },
                     ));
 
                     mark(app, x, y, REMOVE_W, Target::CompareRemove(i));
                     x = x.saturating_add(REMOVE_W);
-                    spans.push(Span::styled(REMOVE_CHIP, Style::new().fg(theme::DIM)));
+                    spans.push(Span::styled(REMOVE_CHIP, Style::new().fg(theme::dim())));
                 }
                 // The one affordance that says the set can grow. Drawn dim
                 // once full, so the cap explains itself rather than the chip
@@ -639,9 +640,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View, plan: &HeaderP
                     spans.push(Span::styled(
                         ADD_CHIP,
                         if room {
-                            Style::new().fg(theme::ACCENT).bold()
+                            Style::new().fg(theme::accent()).bold()
                         } else {
-                            Style::new().fg(theme::DIM)
+                            Style::new().fg(theme::dim())
                         },
                     ));
                 }
@@ -681,9 +682,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, view: &View, plan: &HeaderP
         ranges.push(Span::styled(
             text,
             if *r == app.compare.range {
-                Style::new().fg(theme::ACCENT).bold()
+                Style::new().fg(theme::accent()).bold()
             } else {
-                Style::new().fg(theme::DIM)
+                Style::new().fg(theme::dim())
             },
         ));
     }
@@ -741,33 +742,28 @@ fn draw_overlay(f: &mut Frame, area: Rect, view: &View) {
         .map(|(_, c, v)| (*c, v.clone()))
         .collect();
 
-    let canvas = Canvas::default()
-        .block(Block::default())
-        .marker(theme::marker(symbols::Marker::Braille))
-        .x_bounds([0.0, n - 1.0])
-        .y_bounds([lo, hi])
-        .paint(move |ctx| {
-            // The 100 line is the whole point of rebasing: above it is profit.
-            ctx.draw(&CanvasLine {
-                x1: 0.0,
-                y1: 100.0,
-                x2: n - 1.0,
-                y2: 100.0,
-                color: theme::BORDER,
-            });
-            for (color, values) in &curves {
-                for (i, w) in values.windows(2).enumerate() {
-                    ctx.draw(&CanvasLine {
-                        x1: i as f64,
-                        y1: w[0],
-                        x2: i as f64 + 1.0,
-                        y2: w[1],
-                        color: *color,
-                    });
-                }
+    let art = |p: &mut dyn Paint| {
+        // The 100 line is the whole point of rebasing: above it is profit.
+        p.stroke(0.0, 100.0, n - 1.0, 100.0, theme::border());
+        for (color, values) in &curves {
+            for (i, w) in values.windows(2).enumerate() {
+                p.stroke(i as f64, w[0], i as f64 + 1.0, w[1], *color);
             }
-        });
-    f.render_widget(canvas, plot);
+        }
+    };
+
+    if let Some(mut hd) = paint::begin(plot, [0.0, n - 1.0], [lo, hi]) {
+        art(&mut hd);
+        paint::finish(f, "compare.overlay", plot, hd);
+    } else {
+        let canvas = Canvas::default()
+            .block(Block::default())
+            .marker(theme::marker(symbols::Marker::Braille))
+            .x_bounds([0.0, n - 1.0])
+            .y_bounds([lo, hi])
+            .paint(|ctx| art(ctx));
+        f.render_widget(canvas, plot);
+    }
 
     if legend_h > 0 {
         // Entries are laid out by hand rather than word-wrapped, so a symbol
@@ -919,7 +915,7 @@ fn draw_table(f: &mut Frame, area: Rect, view: &View) {
             if rest > 0 {
                 spans.push(Span::styled(
                     format!("{:>rest$}", theme::truncate("no cached history", rest)),
-                    Style::new().fg(theme::WARN),
+                    Style::new().fg(theme::warn()),
                 ));
             }
             lines.push(Line::from(spans));
@@ -927,19 +923,19 @@ fn draw_table(f: &mut Frame, area: Rect, view: &View) {
         }
 
         let cells: [(String, Color); 7] = [
-            (theme::price(row.last), theme::FG),
+            (theme::price(row.last), theme::fg()),
             (
                 theme::pct(row.change_pct),
                 theme::change_color(row.change_pct),
             ),
             (theme::pct(row.cagr_pct), theme::change_color(row.cagr_pct)),
-            (theme::pct_plain(row.vol_pct), theme::MUTED),
+            (theme::pct_plain(row.vol_pct), theme::muted()),
             (
                 theme::opt(finite(row.sharpe), 2),
                 theme::change_color(row.sharpe),
             ),
-            (theme::pct(row.mdd_pct), theme::DOWN),
-            (theme::opt(finite(row.beta), 2), theme::FG),
+            (theme::pct(row.mdd_pct), theme::down()),
+            (theme::opt(finite(row.beta), 2), theme::fg()),
         ];
         for (i, (text, color)) in cells.iter().enumerate() {
             let col = i + 1;
@@ -1009,7 +1005,7 @@ fn draw_matrix(f: &mut Frame, area: Rect, view: &View) {
                 format!("{:>CELL_W$}", theme::opt(finite(c), 2)),
                 Style::new()
                     .bg(widgets::heat_color(c * 10.0, 10.0))
-                    .fg(theme::FG),
+                    .fg(theme::fg()),
             ));
         }
         lines.push(Line::from(spans));

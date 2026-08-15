@@ -173,7 +173,47 @@ psxtui --help       # the two flags there are, plus where your data lives
 
 | Variable | Effect |
 |----------|--------|
+| `PSXTUI_THEME=nord` | Start in a theme — `terminal`, `midnight`, `nord`, `gruvbox`, `solarized`, `paper` or `amber`. Overrides the theme saved by the last session. |
+| `PSXTUI_GRAPHICS=off` | Never draw charts as images, even on a terminal that supports it. `=kitty` forces the other way, for a terminal this doesn't recognise. |
+| `PSXTUI_CELL=9x18` | Cell size in pixels, for a terminal that misreports its own. Only affects how sharp an image chart is, never its position. |
 | `PSXTUI_MARKER=block` | Draw every chart with half-block glyphs instead of braille. Half the vertical resolution, but it renders in any font — the escape hatch when braille shows up as boxes. |
+
+## Themes
+
+Seven of them, cycled with `T` and remembered between sessions:
+
+| Theme | |
+|-------|--|
+| `terminal` | The default. Keeps your terminal's own background, transparency and all. |
+| `midnight` | Deep blue, high contrast — the one to reach for on a translucent window. |
+| `nord`, `gruvbox`, `solarized` | The usual three, matched to their published palettes. |
+| `paper` | Light. Gains and losses are darkened well past their dark-theme values, because a mid green that reads on charcoal is a smudge on paper. |
+| `amber` | Monochrome phosphor. Up and down separate by brightness rather than hue. |
+
+Every theme but `terminal` paints its own background, so the whole screen —
+tables, chart, gutters — is one surface.
+
+## High-definition charts
+
+On a terminal that speaks the [kitty graphics
+protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) — kitty, Ghostty,
+WezTerm, Konsole — charts are rendered as real bitmaps at the font's own pixel
+resolution instead of braille dots. That is roughly forty times the detail: a
+five-year candle chart shows individual wicks, and an overlay is a smooth line
+rather than a dotted trail.
+
+The axis labels, prices and dates stay ordinary terminal text drawn *over* the
+image, so they render at whatever hinting your font uses rather than being
+rasterised into the picture.
+
+Everywhere else — an older terminal, a font without braille, inside tmux or
+screen — the braille canvas is still what runs, and nothing about the app
+changes. Images are also skipped for any frame with a dialog over it, and
+turned off entirely by `PSXTUI_GRAPHICS=off`.
+
+Bitmaps are zlib-compressed before they go down the pty and are only re-sent
+when the picture actually changes, so a redraw that just advanced the spinner
+costs nothing.
 
 ## Keys
 
@@ -188,10 +228,11 @@ Press `?` in the app for the full list.
 | `W` / `e` | Watchlist only / equities only |
 | `w` | Add or remove the current symbol from the watchlist |
 | `[` / `]` | Chart range · `i` cycles the indicator pane |
-| `c` | Chart style: candles → line → dots → area (braille; `PSXTUI_MARKER=block` forces half-blocks) |
+| `c` | Chart style: candles → line → dots → area (pixels where the terminal supports it, else braille) |
 | `m` / `e` / `b` | Toggle SMA / EMA / Bollinger overlays |
 | `a` / `x` | Compare: add a symbol (opens the picker) / remove one · `c` resets |
 | `r` | Refresh · `q` quit |
+| `T` | Cycle colour theme (remembered between sessions) |
 | `M` | Mouse on/off (off restores terminal text selection) |
 | `f` / `←` `→` | Backtest: focus strategies or parameters / tweak the selected one |
 | `Enter` / `s` / `W` / `u` | Backtest: run · sweep parameters · walk forward · scan the market |
@@ -421,6 +462,9 @@ src/
   data.rs     background worker — owns every network call and cache write
   app.rs      all application state and key handling
   ui/         one module per screen; rendering is a pure function of `App`
+              theme.rs  the palettes, and the number formatting every screen shares
+              paint.rs  one drawing vocabulary, drawn by either renderer below
+              gfx.rs    rasteriser + kitty graphics protocol; braille elsewhere
 ```
 
 Two invariants the code depends on:
@@ -446,6 +490,11 @@ Charts aggregate bars into one candle per terminal column (first open, last
 close, extreme high/low, summed volume) rather than dropping sessions, while
 indicators stay computed on the *daily* series — so `SMA(20)` means twenty
 sessions at every zoom level.
+
+A chart is described once, in `ui/paint.rs`, and drawn either onto a braille
+canvas or into a bitmap. Neither renderer knows what a candle is, and an
+indicator added to the description appears in both — which is the point: two
+copies of the same geometry would drift apart on the first change.
 
 ## Development
 

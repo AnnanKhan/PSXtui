@@ -826,6 +826,7 @@ impl App {
     pub fn new(store: Arc<Store>, tx: UnboundedSender<DataRequest>) -> Self {
         let watchlist = load_watchlist(&store);
         let fundamentals = load_fundamentals(&store);
+        load_theme(&store);
         Self {
             store,
             tx,
@@ -1438,6 +1439,14 @@ impl App {
                 } else {
                     "Mouse off — terminal text selection restored".into()
                 };
+            }
+            // Themes cycle rather than opening a picker: there are seven of
+            // them, the effect is visible the instant the key lands, and the
+            // choice is remembered, so a menu would only be in the way.
+            KeyCode::Char('T') => {
+                let p = crate::ui::theme::next_theme();
+                let _ = self.store.set_meta(THEME_KEY, p.key);
+                self.status = format!("Theme: {}", p.name);
             }
             KeyCode::Esc => {
                 // Clear the most specific thing first, so one key backs out of
@@ -2788,6 +2797,27 @@ fn load_watchlist(store: &Store) -> BTreeSet<String> {
 fn save_watchlist(store: &Store, list: &BTreeSet<String>) {
     if let Ok(json) = serde_json::to_string(list) {
         let _ = store.set_meta(WATCHLIST_KEY, &json);
+    }
+}
+
+// --- theme persistence ---------------------------------------------------
+
+const THEME_KEY: &str = "theme";
+
+/// Apply the theme saved by an earlier session.
+///
+/// `PSXTUI_THEME` wins: an explicit choice in the environment is for this run,
+/// and it would be rude to have it silently overwritten by a stored preference
+/// from last week. A stored theme that no longer exists — renamed, or dropped
+/// between versions — is ignored rather than treated as an error.
+fn load_theme(store: &Store) {
+    if std::env::var_os("PSXTUI_THEME").is_some() {
+        return;
+    }
+    if let Ok(Some(key)) = store.get_meta(THEME_KEY)
+        && let Some(i) = crate::ui::theme::theme_index(&key)
+    {
+        crate::ui::theme::set_theme(i);
     }
 }
 

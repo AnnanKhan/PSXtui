@@ -3,63 +3,358 @@
 //! Keeping both here means every screen renders a price, a percentage or a
 //! volume the same way — the tables line up and the eye can scan a column
 //! without re-reading units.
+//!
+//! Colours are read through functions rather than constants because the active
+//! [`Palette`] can change while the app runs: `t` cycles themes and every
+//! subsequent frame picks up the new one. A frame is drawn from one thread, so
+//! the selection is a plain atomic index into [`THEMES`] — no lock on the hot
+//! path.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::prelude::*;
 use ratatui::symbols::Marker;
 
 // --- palette -------------------------------------------------------------
 
-pub const FG: Color = Color::Rgb(220, 223, 228);
-pub const DIM: Color = Color::Rgb(110, 118, 129);
-pub const MUTED: Color = Color::Rgb(139, 148, 158);
-pub const BORDER: Color = Color::Rgb(48, 54, 61);
-pub const ACCENT: Color = Color::Rgb(88, 166, 255);
-pub const UP: Color = Color::Rgb(63, 185, 80);
-pub const DOWN: Color = Color::Rgb(248, 81, 73);
-pub const FLAT: Color = Color::Rgb(139, 148, 158);
-pub const WARN: Color = Color::Rgb(210, 153, 34);
-pub const SELECT_BG: Color = Color::Rgb(33, 38, 45);
-pub const VOLUME: Color = Color::Rgb(88, 110, 150);
+/// Every colour a screen can ask for.
+///
+/// One struct rather than a trait or a map: a palette is data, and a new theme
+/// should be a literal someone can read top to bottom and compare against its
+/// neighbours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    /// Lower-case key used by `PSXTUI_THEME` and stored in the cache.
+    pub key: &'static str,
+    /// How the theme is named in the status bar.
+    pub name: &'static str,
+    /// Whether the theme paints the whole screen itself.
+    ///
+    /// The default theme leaves the terminal's own background showing, which
+    /// keeps transparency and blur working. Every other theme owns the
+    /// background, because a Solarized foreground over someone else's
+    /// background is not Solarized.
+    pub opaque: bool,
+    /// The background the theme assumes. Used to paint the screen when
+    /// `opaque`, and always used as the ground for pixel-rendered charts,
+    /// which have no notion of a "default" colour.
+    pub bg: Color,
+    pub fg: Color,
+    pub dim: Color,
+    pub muted: Color,
+    pub border: Color,
+    pub accent: Color,
+    pub up: Color,
+    pub down: Color,
+    pub flat: Color,
+    pub warn: Color,
+    pub select_bg: Color,
+    pub volume: Color,
+    /// Extra hues, used where several series share one set of axes and the
+    /// only thing telling them apart is colour. Chosen to stay separable from
+    /// each other *and* from the four above, which come first.
+    pub violet: Color,
+    pub cyan: Color,
+    pub pink: Color,
+    pub sand: Color,
+}
 
-/// Extra hues, used where several series share one set of axes and the only
-/// thing telling them apart is colour. Chosen to stay separable on a dark
-/// background *and* from the four above, which come first.
-pub const VIOLET: Color = Color::Rgb(188, 140, 255);
-pub const CYAN: Color = Color::Rgb(57, 197, 207);
-pub const PINK: Color = Color::Rgb(247, 120, 186);
-pub const SAND: Color = Color::Rgb(219, 171, 121);
+const fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+/// The original palette: GitHub-dark hues over whatever background the
+/// terminal already had.
+pub const TERMINAL: Palette = Palette {
+    key: "terminal",
+    name: "Terminal",
+    opaque: false,
+    bg: rgb(13, 17, 23),
+    fg: rgb(220, 223, 228),
+    dim: rgb(110, 118, 129),
+    muted: rgb(139, 148, 158),
+    border: rgb(48, 54, 61),
+    accent: rgb(88, 166, 255),
+    up: rgb(63, 185, 80),
+    down: rgb(248, 81, 73),
+    flat: rgb(139, 148, 158),
+    warn: rgb(210, 153, 34),
+    select_bg: rgb(33, 38, 45),
+    volume: rgb(88, 110, 150),
+    violet: rgb(188, 140, 255),
+    cyan: rgb(57, 197, 207),
+    pink: rgb(247, 120, 186),
+    sand: rgb(219, 171, 121),
+};
+
+/// The same hues, but owning the background — for terminals whose default is
+/// light, or a translucent surface that makes thin strokes hard to read.
+pub const MIDNIGHT: Palette = Palette {
+    key: "midnight",
+    name: "Midnight",
+    opaque: true,
+    bg: rgb(16, 18, 28),
+    fg: rgb(192, 202, 245),
+    dim: rgb(86, 95, 137),
+    muted: rgb(130, 139, 184),
+    border: rgb(41, 46, 66),
+    accent: rgb(122, 162, 247),
+    up: rgb(158, 206, 106),
+    down: rgb(247, 118, 142),
+    flat: rgb(130, 139, 184),
+    warn: rgb(224, 175, 104),
+    select_bg: rgb(32, 37, 57),
+    volume: rgb(86, 108, 168),
+    violet: rgb(187, 154, 247),
+    cyan: rgb(125, 207, 255),
+    pink: rgb(255, 138, 197),
+    sand: rgb(222, 189, 137),
+};
+
+pub const NORD: Palette = Palette {
+    key: "nord",
+    name: "Nord",
+    opaque: true,
+    bg: rgb(46, 52, 64),
+    fg: rgb(216, 222, 233),
+    dim: rgb(97, 110, 136),
+    muted: rgb(143, 156, 178),
+    border: rgb(59, 66, 82),
+    accent: rgb(136, 192, 208),
+    up: rgb(163, 190, 140),
+    down: rgb(191, 97, 106),
+    flat: rgb(143, 156, 178),
+    warn: rgb(235, 203, 139),
+    select_bg: rgb(59, 66, 82),
+    volume: rgb(94, 129, 172),
+    violet: rgb(180, 142, 173),
+    cyan: rgb(143, 188, 187),
+    pink: rgb(208, 135, 173),
+    sand: rgb(222, 190, 145),
+};
+
+pub const GRUVBOX: Palette = Palette {
+    key: "gruvbox",
+    name: "Gruvbox",
+    opaque: true,
+    bg: rgb(29, 32, 33),
+    fg: rgb(235, 219, 178),
+    dim: rgb(124, 111, 100),
+    muted: rgb(168, 153, 132),
+    border: rgb(60, 56, 54),
+    accent: rgb(131, 165, 152),
+    up: rgb(184, 187, 38),
+    down: rgb(251, 73, 52),
+    flat: rgb(168, 153, 132),
+    warn: rgb(250, 189, 47),
+    select_bg: rgb(50, 48, 47),
+    volume: rgb(104, 125, 118),
+    violet: rgb(211, 134, 155),
+    cyan: rgb(142, 192, 124),
+    pink: rgb(211, 134, 155),
+    sand: rgb(214, 153, 33),
+};
+
+pub const SOLARIZED: Palette = Palette {
+    key: "solarized",
+    name: "Solarized Dark",
+    opaque: true,
+    bg: rgb(0, 43, 54),
+    fg: rgb(147, 161, 161),
+    dim: rgb(88, 110, 117),
+    muted: rgb(131, 148, 150),
+    border: rgb(7, 54, 66),
+    accent: rgb(38, 139, 210),
+    up: rgb(133, 153, 0),
+    down: rgb(220, 50, 47),
+    flat: rgb(131, 148, 150),
+    warn: rgb(181, 137, 0),
+    select_bg: rgb(7, 54, 66),
+    volume: rgb(42, 106, 128),
+    violet: rgb(108, 113, 196),
+    cyan: rgb(42, 161, 152),
+    pink: rgb(211, 54, 130),
+    sand: rgb(203, 75, 22),
+};
+
+/// A light theme, for a bright room or a projector. The up/down pair is darkened
+/// well past the dark themes' — a mid green that reads fine on charcoal turns
+/// into a smudge on paper.
+pub const PAPER: Palette = Palette {
+    key: "paper",
+    name: "Paper",
+    opaque: true,
+    bg: rgb(253, 246, 227),
+    fg: rgb(60, 66, 74),
+    dim: rgb(147, 153, 142),
+    muted: rgb(101, 123, 131),
+    border: rgb(214, 206, 184),
+    accent: rgb(24, 106, 173),
+    up: rgb(28, 126, 61),
+    down: rgb(190, 40, 38),
+    flat: rgb(120, 130, 133),
+    warn: rgb(160, 108, 0),
+    select_bg: rgb(238, 230, 208),
+    volume: rgb(140, 160, 180),
+    violet: rgb(96, 84, 178),
+    cyan: rgb(20, 132, 128),
+    pink: rgb(184, 44, 116),
+    sand: rgb(150, 92, 30),
+};
+
+/// A monochrome amber phosphor, for the terminal that wants to look like the
+/// terminal. Up and down are separated by brightness rather than hue, so the
+/// sign still reads.
+pub const AMBER: Palette = Palette {
+    key: "amber",
+    name: "Amber",
+    opaque: true,
+    bg: rgb(18, 12, 4),
+    fg: rgb(255, 176, 46),
+    dim: rgb(112, 74, 20),
+    muted: rgb(178, 122, 34),
+    border: rgb(74, 50, 14),
+    accent: rgb(255, 214, 122),
+    up: rgb(255, 208, 96),
+    down: rgb(198, 92, 22),
+    flat: rgb(160, 112, 32),
+    warn: rgb(255, 236, 170),
+    select_bg: rgb(48, 32, 8),
+    volume: rgb(126, 84, 24),
+    violet: rgb(226, 160, 90),
+    cyan: rgb(255, 232, 150),
+    pink: rgb(214, 124, 48),
+    sand: rgb(200, 148, 60),
+};
+
+/// Every theme, in cycle order. The first is the default.
+pub const THEMES: &[Palette] = &[TERMINAL, MIDNIGHT, NORD, GRUVBOX, SOLARIZED, PAPER, AMBER];
+
+static ACTIVE: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// The palette every colour accessor reads.
+///
+/// The first call resolves `PSXTUI_THEME`, so a theme set in the environment
+/// applies even before the app has loaded its saved choice.
+pub fn palette() -> &'static Palette {
+    let mut i = ACTIVE.load(Ordering::Relaxed);
+    if i == usize::MAX {
+        i = std::env::var("PSXTUI_THEME")
+            .ok()
+            .and_then(|v| theme_index(&v))
+            .unwrap_or(0);
+        ACTIVE.store(i, Ordering::Relaxed);
+    }
+    &THEMES[i.min(THEMES.len() - 1)]
+}
+
+/// The index of the theme named `key`, matched case-insensitively against both
+/// the key and the display name.
+pub fn theme_index(key: &str) -> Option<usize> {
+    let key = key.trim().to_ascii_lowercase();
+    THEMES
+        .iter()
+        .position(|p| p.key == key || p.name.to_ascii_lowercase() == key)
+}
+
+/// Switch to a theme by index. Out-of-range indices wrap, so callers can just
+/// add one.
+pub fn set_theme(i: usize) {
+    ACTIVE.store(i % THEMES.len(), Ordering::Relaxed);
+}
+
+/// The active theme's index.
+pub fn current() -> usize {
+    // Through `palette` so the environment default is resolved first.
+    let p = palette();
+    THEMES.iter().position(|t| t.key == p.key).unwrap_or(0)
+}
+
+/// Advance to the next theme and return it.
+pub fn next_theme() -> &'static Palette {
+    set_theme(current() + 1);
+    palette()
+}
+
+pub fn bg() -> Color {
+    palette().bg
+}
+pub fn fg() -> Color {
+    palette().fg
+}
+pub fn dim() -> Color {
+    palette().dim
+}
+pub fn muted() -> Color {
+    palette().muted
+}
+pub fn border() -> Color {
+    palette().border
+}
+pub fn accent() -> Color {
+    palette().accent
+}
+pub fn up() -> Color {
+    palette().up
+}
+pub fn down() -> Color {
+    palette().down
+}
+pub fn flat() -> Color {
+    palette().flat
+}
+pub fn warn() -> Color {
+    palette().warn
+}
+pub fn select_bg() -> Color {
+    palette().select_bg
+}
+pub fn volume() -> Color {
+    palette().volume
+}
+pub fn violet() -> Color {
+    palette().violet
+}
+pub fn cyan() -> Color {
+    palette().cyan
+}
+pub fn pink() -> Color {
+    palette().pink
+}
+pub fn sand() -> Color {
+    palette().sand
+}
 
 /// Colour for a signed change: green up, red down, grey unchanged.
 pub fn change_color(v: f64) -> Color {
     if v > 0.0 {
-        UP
+        up()
     } else if v < 0.0 {
-        DOWN
+        down()
     } else {
-        FLAT
+        flat()
     }
 }
 
 pub fn header_style() -> Style {
-    Style::new().fg(MUTED).bold()
+    Style::new().fg(muted()).bold()
 }
 
 pub fn title_style() -> Style {
-    Style::new().fg(ACCENT).bold()
+    Style::new().fg(accent()).bold()
 }
 
 pub fn border_style() -> Style {
-    Style::new().fg(BORDER)
+    Style::new().fg(border())
 }
 
 pub fn label_style() -> Style {
-    Style::new().fg(DIM)
+    Style::new().fg(dim())
 }
 
 pub fn value_style() -> Style {
-    Style::new().fg(FG)
+    Style::new().fg(fg())
 }
 
 // --- formatting ----------------------------------------------------------
@@ -187,6 +482,9 @@ pub fn truncate(s: &str, width: usize) -> String {
 /// Passing a non-braille marker through is deliberate — the chart's line and
 /// area styles already use half-blocks, and the override has nothing to say
 /// about them.
+///
+/// None of this applies when the terminal draws charts as images: see
+/// [`super::gfx`], which bypasses cell markers entirely.
 pub fn marker(preferred: Marker) -> Marker {
     static BLOCK: OnceLock<bool> = OnceLock::new();
     let block = *BLOCK.get_or_init(|| {
@@ -281,14 +579,53 @@ mod tests {
 
     #[test]
     fn change_colour_follows_sign() {
-        assert_eq!(change_color(1.0), UP);
-        assert_eq!(change_color(-1.0), DOWN);
-        assert_eq!(change_color(0.0), FLAT);
+        assert_eq!(change_color(1.0), up());
+        assert_eq!(change_color(-1.0), down());
+        assert_eq!(change_color(0.0), flat());
     }
 
     #[test]
     fn truncates_with_an_ellipsis() {
         assert_eq!(truncate("Habib Bank Limited", 8), "Habib B…");
         assert_eq!(truncate("HBL", 8), "HBL");
+    }
+
+    #[test]
+    fn themes_are_addressable_by_key_and_name() {
+        assert_eq!(theme_index("nord"), Some(2));
+        assert_eq!(theme_index(" Solarized Dark "), Some(4));
+        assert_eq!(theme_index("NORD"), Some(2));
+        assert_eq!(theme_index("no-such-theme"), None);
+    }
+
+    #[test]
+    fn cycling_wraps_and_lands_on_every_theme() {
+        let start = current();
+        let mut seen = Vec::new();
+        for _ in 0..THEMES.len() {
+            seen.push(next_theme().key);
+        }
+        assert_eq!(seen.len(), THEMES.len(), "the cycle visits every theme");
+        assert_eq!(current(), start, "and returns to where it began");
+    }
+
+    /// Every theme must separate up from down, and both from the background —
+    /// a palette where a gain and a loss look the same is not usable.
+    #[test]
+    fn every_theme_distinguishes_its_key_colours() {
+        for p in THEMES {
+            assert_ne!(p.up, p.down, "{} up == down", p.key);
+            assert_ne!(p.fg, p.bg, "{} fg == bg", p.key);
+            assert_ne!(p.accent, p.bg, "{} accent == bg", p.key);
+            assert_ne!(p.select_bg, p.fg, "{} selection hides text", p.key);
+        }
+    }
+
+    #[test]
+    fn theme_keys_are_unique_and_lower_case() {
+        for (i, p) in THEMES.iter().enumerate() {
+            assert_eq!(p.key, p.key.to_ascii_lowercase(), "{} is not lower case", i);
+            assert_eq!(theme_index(p.key), Some(i), "{} is not addressable", p.key);
+        }
     }
 }

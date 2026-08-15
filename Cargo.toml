@@ -24,6 +24,12 @@ serde_json = "1.0.151"
 # Strategy files for the backtester are TOML, matching Cargo's own idiom.
 toml = "1.1.4"
 tokio = { version = "1.53.1", features = ["full"] }
+# Chart bitmaps go to the terminal zlib-compressed (see ui::gfx): a chart is
+# mostly flat colour, so it shrinks by one to two orders of magnitude, which is
+# the difference between a redraw that feels instant and one that does not.
+# `rust_backend` rather than the default: miniz_oxide is pure Rust, so this adds
+# no C toolchain requirement to any target.
+flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
 
 # A console left on a regional code page renders every box-drawing and braille
 # glyph as mojibake, so the app switches it to UTF-8 on the way in.

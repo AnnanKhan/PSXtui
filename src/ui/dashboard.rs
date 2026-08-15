@@ -43,9 +43,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         let b = breadth(&app.quotes);
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(format!("▲{} ", b.up), Style::new().fg(theme::UP)),
-                Span::styled(format!("▼{} ", b.down), Style::new().fg(theme::DOWN)),
-                Span::styled(format!("={} ", b.flat), Style::new().fg(theme::FLAT)),
+                Span::styled(format!("▲{} ", b.up), Style::new().fg(theme::up())),
+                Span::styled(format!("▼{} ", b.down), Style::new().fg(theme::down())),
+                Span::styled(format!("={} ", b.flat), Style::new().fg(theme::flat())),
                 Span::styled(theme::compact(b.turnover), theme::value_style()),
             ])),
             area,
@@ -183,28 +183,31 @@ fn draw_breadth(f: &mut Frame, area: Rect, app: &App) {
 
     lines.push(if narrow {
         Line::from(vec![
-            Span::styled(format!("▲{:<5}", b.up), Style::new().fg(theme::UP).bold()),
+            Span::styled(format!("▲{:<5}", b.up), Style::new().fg(theme::up()).bold()),
             Span::styled(
                 format!("▼{:<5}", b.down),
-                Style::new().fg(theme::DOWN).bold(),
+                Style::new().fg(theme::down()).bold(),
             ),
-            Span::styled(format!("─{}", b.flat), Style::new().fg(theme::FLAT).bold()),
+            Span::styled(
+                format!("─{}", b.flat),
+                Style::new().fg(theme::flat()).bold(),
+            ),
         ])
     } else {
         Line::from(vec![
-            Span::styled("▲ ", Style::new().fg(theme::UP)),
-            Span::styled(format!("{:<5}", b.up), Style::new().fg(theme::UP).bold()),
+            Span::styled("▲ ", Style::new().fg(theme::up())),
+            Span::styled(format!("{:<5}", b.up), Style::new().fg(theme::up()).bold()),
             Span::styled("advancing   ", theme::label_style()),
-            Span::styled("▼ ", Style::new().fg(theme::DOWN)),
+            Span::styled("▼ ", Style::new().fg(theme::down())),
             Span::styled(
                 format!("{:<5}", b.down),
-                Style::new().fg(theme::DOWN).bold(),
+                Style::new().fg(theme::down()).bold(),
             ),
             Span::styled("declining   ", theme::label_style()),
-            Span::styled("─ ", Style::new().fg(theme::FLAT)),
+            Span::styled("─ ", Style::new().fg(theme::flat())),
             Span::styled(
                 format!("{:<5}", b.flat),
-                Style::new().fg(theme::FLAT).bold(),
+                Style::new().fg(theme::flat()).bold(),
             ),
             Span::styled("unchanged", theme::label_style()),
         ])
@@ -213,9 +216,9 @@ fn draw_breadth(f: &mut Frame, area: Rect, app: &App) {
     if inner.height >= 2 {
         let (uw, dw, fw) = breadth_segments(&b, w);
         lines.push(Line::from(vec![
-            Span::styled(widgets::bar(1.0, uw), Style::new().fg(theme::UP)),
-            Span::styled(widgets::bar(1.0, dw), Style::new().fg(theme::DOWN)),
-            Span::styled("░".repeat(fw), Style::new().fg(theme::BORDER)),
+            Span::styled(widgets::bar(1.0, uw), Style::new().fg(theme::up())),
+            Span::styled(widgets::bar(1.0, dw), Style::new().fg(theme::down())),
+            Span::styled("░".repeat(fw), Style::new().fg(theme::border())),
         ]));
     }
 
@@ -330,7 +333,11 @@ fn quote_line(q: &Quote, width: usize, by_value: bool, selected: bool) -> Line<'
             sym_w = sym_w
         ),
         Style::new()
-            .fg(if selected { theme::ACCENT } else { theme::FG })
+            .fg(if selected {
+                theme::accent()
+            } else {
+                theme::fg()
+            })
             .bold(),
     )];
     if price {
@@ -349,13 +356,13 @@ fn quote_line(q: &Quote, width: usize, by_value: bool, selected: bool) -> Line<'
         let v = if by_value { q.turnover() } else { q.volume };
         spans.push(Span::styled(
             format!(" {:>VAL_W$}", theme::compact(v)),
-            Style::new().fg(theme::VOLUME),
+            Style::new().fg(theme::volume()),
         ));
     }
 
     let line = Line::from(spans);
     if selected {
-        line.style(Style::new().bg(theme::SELECT_BG))
+        line.style(Style::new().bg(theme::select_bg()))
     } else {
         line
     }
@@ -492,9 +499,9 @@ fn sector_line(s: &SectorAgg, width: usize, selected: bool) -> Line<'static> {
     // Above roughly half saturation the background is bright enough that white
     // text reads better than the muted foreground.
     let fg = if s.avg_pct.abs() >= 2.5 {
-        theme::FG
+        theme::fg()
     } else {
-        theme::MUTED
+        theme::muted()
     };
 
     // The cursor row is marked with a rule in its own column, so the marker
@@ -529,8 +536,8 @@ fn sector_line(s: &SectorAgg, width: usize, selected: bool) -> Line<'static> {
 
     if selected {
         return Line::from(vec![
-            Span::styled("▌", Style::new().fg(theme::ACCENT).bg(bg)),
-            Span::styled(text, Style::new().bg(bg).fg(theme::FG).bold()),
+            Span::styled("▌", Style::new().fg(theme::accent()).bg(bg)),
+            Span::styled(text, Style::new().bg(bg).fg(theme::fg()).bold()),
         ]);
     }
     Line::from(Span::styled(text, Style::new().bg(bg).fg(fg).bold()))
@@ -554,7 +561,7 @@ fn draw_sectors(f: &mut Frame, area: Rect, app: &App) {
         )
     };
     let block = widgets::panel(&title).border_style(if focused {
-        Style::new().fg(theme::ACCENT)
+        Style::new().fg(theme::accent())
     } else {
         theme::border_style()
     });
@@ -634,7 +641,7 @@ fn draw_sectors(f: &mut Frame, area: Rect, app: &App) {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     marks.join(" "),
-                    Style::new().fg(theme::ACCENT),
+                    Style::new().fg(theme::accent()),
                 )))
                 .alignment(Alignment::Right),
                 Rect {
@@ -936,7 +943,7 @@ mod tests {
             let row: String = (0..buf.area.width)
                 .map(|x| buf[(x, y)].symbol().to_string())
                 .collect();
-            let lit = (0..buf.area.width).any(|x| buf[(x, y)].bg == theme::SELECT_BG);
+            let lit = (0..buf.area.width).any(|x| buf[(x, y)].bg == theme::select_bg());
             if lit && !row.trim().is_empty() {
                 out.push(row.trim().to_string());
             }

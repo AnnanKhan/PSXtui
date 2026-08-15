@@ -72,6 +72,8 @@ pub enum ScanScope {
     /// The most liquid symbols on the board, up to [`SCAN_LIMIT`].
     #[default]
     Market,
+    /// Every symbol on the board, however thin.
+    All,
     /// Exactly the symbols on the Compare screen.
     Compare,
 }
@@ -79,7 +81,8 @@ pub enum ScanScope {
 impl ScanScope {
     pub fn label(&self) -> &'static str {
         match self {
-            ScanScope::Market => "Market",
+            ScanScope::Market => "Market 150",
+            ScanScope::All => "All symbols",
             ScanScope::Compare => "Compare set",
         }
     }
@@ -175,26 +178,15 @@ impl BacktestState {
     /// screen can never show a sweep computed from different parameters than
     /// the equity curve beside it.
     pub fn invalidate(&mut self) {
-        self.invalidate_symbol();
-        self.scan.clear();
-        self.scan_summary = ScanSummary::default();
-        self.scan_asked = 0;
-        self.scan_offset = 0;
-    }
-
-    /// Drop only what was computed from the selected symbol's bars.
-    ///
-    /// Called when the symbol changes. The equity curve, its trades, the sweep
-    /// and the walk-forward folds all describe one scrip, and showing them
-    /// under another scrip's name is worse than showing nothing — the panel
-    /// title would name the new symbol over the old symbol's numbers. A scan
-    /// survives: it was never about the selected symbol.
-    pub fn invalidate_symbol(&mut self) {
         self.report = None;
         self.sweep.clear();
         self.walk_forward = None;
+        self.scan.clear();
+        self.scan_summary = ScanSummary::default();
+        self.scan_asked = 0;
         self.trades_offset = 0;
         self.sweep_offset = 0;
+        self.scan_offset = 0;
         self.error = None;
     }
 

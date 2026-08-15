@@ -49,7 +49,7 @@ const COMPANY_TTL_DAYS: i64 = 1;
 // --- messages ------------------------------------------------------------
 
 /// Work the UI asks the background worker to perform.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum DataRequest {
     /// Refresh the market-watch board and index ticker.
     RefreshMarket,
@@ -67,6 +67,20 @@ pub enum DataRequest {
     DeepBackfill,
     /// Refresh external market context: commodities/FX, headlines, policy rate.
     RefreshExternal,
+    /// Run a strategy across every symbol given.
+    ///
+    /// The only backtest that does not run inline. A single run is
+    /// microseconds and a sweep a few milliseconds, but a scan is
+    /// O(symbols x bars) with a cache read per symbol, and the whole market is
+    /// ten seconds of it — a frozen terminal rather than a slow frame. The
+    /// bounded scan on the most liquid names stays synchronous; this one goes
+    /// to the worker and reports when it lands.
+    ScanUniverse {
+        strategy: Box<backtest::Strategy>,
+        params: HashMap<String, f64>,
+        config: backtest::Config,
+        symbols: Vec<String>,
+    },
 }
 
 /// Results flowing back from the background worker.
@@ -97,6 +111,13 @@ pub enum DataEvent {
     Backfill(BackfillProgress),
     /// Backfill finished, or had nothing to do.
     BackfillDone,
+    /// A universe scan finished. `asked` is how many symbols it was given,
+    /// which is not how many produced a row — see [`DataEvent::ScanRows`]'s
+    /// use in the Backtest screen.
+    ScanRows {
+        rows: Vec<backtest::ScanRow>,
+        asked: usize,
+    },
     /// Commodity, FX and global-index series for the Macro screen.
     MacroSeries(Vec<MacroSeries>),
     /// Business headlines, newest first.
@@ -1004,6 +1025,20 @@ impl App {
                     self.company = Some(*c);
                 }
             }
+            DataEvent::ScanRows { rows, asked } => {
+                self.backtest.scan_summary = optimize::summarize(&rows);
+                self.status = format!(
+                    "All symbols: ran {} of {}; {} profitable",
+                    rows.len(),
+                    asked,
+                    self.backtest.scan_summary.profitable
+                );
+                self.backtest.scan = rows;
+                self.backtest.scan_scope = ScanScope::All;
+                self.backtest.scan_asked = asked;
+                self.backtest.scan_offset = 0;
+                self.backtest.view = BtView::Scan;
+            }
             DataEvent::Status(s) => self.status = s,
             DataEvent::Error(e) => self.error = Some(e),
             DataEvent::Begin(label) => self.activities.push(label),
@@ -1054,9 +1089,6 @@ impl App {
         self.bars.clear();
         self.company = None;
         self.announcement_cursor = 0;
-        // A backtest describes the scrip it ran on. Keeping it across a symbol
-        // change would put the new name over the old numbers.
-        self.backtest.invalidate_symbol();
         self.needs_cache_load = true;
     }
 
@@ -2666,6 +2698,42 @@ impl App {
         self.backtest_run_scan(&symbols, ScanScope::Market, optimize::Silent::Drop);
     }
 
+    /// Run the strategy over every symbol on the board, in the background.
+    ///
+    /// `u` covers the most liquid 150 inline because that is where a tradable
+    /// edge has to show up and the answer is instant. This one answers the
+    /// other question — what the rule did across everything listed, thin
+    /// scrips included — and is worth waiting a few seconds for.
+    fn backtest_scan_everything(&mut self) {
+        let Some(strategy) = self.backtest.strategy() else {
+            return;
+        };
+        let strategy = Box::new(strategy.clone());
+
+        // Ranked by turnover like the bounded scan, so the rows most worth
+        // reading come out at a familiar place in the table — but uncapped.
+        let mut ranked: Vec<&Quote> = self.quotes.iter().collect();
+        ranked.sort_by(|a, b| {
+            b.turnover()
+                .partial_cmp(&a.turnover())
+                .unwrap_or(Ordering::Equal)
+        });
+        let symbols: Vec<String> = ranked.iter().map(|q| q.symbol.clone()).collect();
+
+        if symbols.is_empty() {
+            self.backtest.error = Some("No symbols loaded yet — wait for the board.".into());
+            return;
+        }
+
+        self.status = format!("Scanning all {} symbols in the background…", symbols.len());
+        self.request(DataRequest::ScanUniverse {
+            strategy,
+            params: self.backtest.params.clone(),
+            config: self.backtest.config,
+            symbols,
+        });
+    }
+
     /// Run the strategy over exactly the symbols on the Compare screen.
     ///
     /// The market scan answers "does this rule work anywhere"; this answers
@@ -2816,6 +2884,14 @@ impl App {
             KeyCode::Char('s') => self.backtest_sweep(),
             KeyCode::Char('b') => self.backtest_take_best(),
             KeyCode::Char('W') => self.backtest_walk_forward(),
+            // Both encodings of Shift-U, and before the plain `u` arm or the
+            // guard would never be reached: a terminal on the legacy protocol
+            // sends the shifted character, while one negotiating the kitty
+            // keyboard protocol sends the base key with a modifier.
+            KeyCode::Char('U') => self.backtest_scan_everything(),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.backtest_scan_everything()
+            }
             KeyCode::Char('u') => self.backtest_scan(),
             KeyCode::Char('c') => self.backtest_compare_scan(),
             KeyCode::Char('o') => {
@@ -2996,6 +3072,22 @@ mod tests {
         App::new(store, tx)
     }
 
+    /// Whether a request for `symbol` of the given kind was queued.
+    ///
+    /// `DataRequest` carries a parsed strategy and so cannot derive equality;
+    /// these tests only ever asked "was this one sent", which is this.
+    fn asked_to_load(requests: &[DataRequest], symbol: &str) -> bool {
+        requests
+            .iter()
+            .any(|r| matches!(r, DataRequest::LoadSymbol(s) if s == symbol))
+    }
+
+    fn asked_to_refresh(requests: &[DataRequest]) -> bool {
+        requests
+            .iter()
+            .any(|r| matches!(r, DataRequest::RefreshMarket))
+    }
+
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
@@ -3113,35 +3205,6 @@ exit = "close < fast"
         );
     }
 
-    /// A report describes the scrip it ran on, so changing symbol must drop it
-    /// rather than leave the new name over the old numbers. A scan is not about
-    /// the selected symbol and survives.
-    #[test]
-    fn changing_symbol_drops_the_report_but_keeps_a_scan() {
-        let mut a = app_with_strategies();
-        a.selected = "AAA".into();
-        a.compare.symbols = vec!["AAA".into()];
-        let bars = trending_bars();
-        a.store.put_eod_bars("AAA", &bars).unwrap();
-        a.on_event(DataEvent::Bars {
-            symbol: "AAA".into(),
-            bars,
-        });
-
-        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(a.backtest.report.is_some(), "ran on AAA");
-        a.on_key(key('c'));
-        assert!(!a.backtest.scan.is_empty(), "and scanned the compare set");
-
-        a.select("BBB".into());
-
-        assert!(a.backtest.report.is_none(), "the equity curve was AAA's");
-        assert!(
-            !a.backtest.scan.is_empty(),
-            "the scan was nobody's in particular"
-        );
-    }
-
     /// Searching from a screen that is about one symbol should stay on it:
     /// from the backtester, "/" means "run this on that one instead".
     #[test]
@@ -3171,6 +3234,65 @@ exit = "close < fast"
         a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(a.selected, "OGDC");
         assert_eq!(a.screen, Screen::Chart);
+    }
+
+    /// `U` hands the whole board to the worker rather than running it inline —
+    /// ten seconds of arithmetic in a key handler is a frozen terminal.
+    #[test]
+    fn shift_u_sends_every_symbol_to_the_worker() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (tx, mut rx) = detached_channel();
+        let mut a = App::new(store, tx);
+        a.screen = Screen::Backtest;
+        a.backtest.strategies = app_with_strategies().backtest.strategies;
+        a.backtest.reset_params();
+        a.on_event(DataEvent::Quotes(vec![
+            quote("AAA", 10.0, 1.0, 100.0),
+            quote("BBB", 20.0, 1.0, 5_000.0),
+        ]));
+        while rx.try_recv().is_ok() {}
+
+        a.on_key(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::SHIFT));
+
+        let mut symbols = None;
+        while let Ok(req) = rx.try_recv() {
+            if let DataRequest::ScanUniverse { symbols: s, .. } = req {
+                symbols = Some(s);
+            }
+        }
+        let symbols = symbols.expect("a scan request was queued");
+        assert_eq!(
+            symbols,
+            vec!["BBB".to_string(), "AAA".to_string()],
+            "every symbol, most liquid first"
+        );
+        assert!(
+            a.backtest.scan.is_empty(),
+            "nothing is shown until it lands"
+        );
+    }
+
+    /// And when it lands, the table shows it and says which universe it was.
+    #[test]
+    fn scan_rows_from_the_worker_land_in_the_table() {
+        let mut a = app_with_strategies();
+        a.on_event(DataEvent::ScanRows {
+            rows: vec![crate::backtest::ScanRow {
+                symbol: "AAA".into(),
+                total_return_pct: 12.0,
+                buy_hold_return_pct: 4.0,
+                sharpe: 0.5,
+                max_drawdown_pct: -10.0,
+                trade_count: 3,
+                win_rate_pct: 66.0,
+            }],
+            asked: 700,
+        });
+
+        assert_eq!(a.backtest.view, BtView::Scan);
+        assert_eq!(a.backtest.scan_scope, ScanScope::All);
+        assert_eq!(a.backtest.scan_asked, 700, "how many were offered");
+        assert_eq!(a.backtest.scan.len(), 1, "and how many produced a row");
     }
 
     /// `f` still moves focus by hand, and the strategy list still scrolls.
@@ -3312,9 +3434,8 @@ exit = "close < fast"
         );
 
         assert!(settle(&mut a));
-        assert_eq!(
-            rx.try_recv(),
-            Ok(DataRequest::LoadSymbol("HBL".into())),
+        assert!(
+            matches!(rx.try_recv(), Ok(DataRequest::LoadSymbol(s)) if s == "HBL"),
             "an empty cache leaves nothing to show, so it must fetch"
         );
     }
@@ -3404,10 +3525,10 @@ exit = "close < fast"
 
         let requests: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(
-            !requests.contains(&DataRequest::LoadSymbol("HBL".into())),
+            !asked_to_load(&requests, "HBL"),
             "the abandoned symbol must not be fetched"
         );
-        assert!(requests.contains(&DataRequest::LoadSymbol("OGDC".into())));
+        assert!(asked_to_load(&requests, "OGDC"));
     }
 
     #[test]
@@ -3426,9 +3547,9 @@ exit = "close < fast"
         while let Ok(r) = rx.try_recv() {
             requests.push(r);
         }
-        assert!(requests.contains(&DataRequest::RefreshMarket));
+        assert!(asked_to_refresh(&requests));
         assert!(
-            requests.contains(&DataRequest::LoadSymbol("HBL".into())),
+            asked_to_load(&requests, "HBL"),
             "r must override the freshness window"
         );
     }

@@ -563,6 +563,34 @@ fn draw_trades(f: &mut Frame, area: Rect, app: &App) {
 
 // --- sweep ----------------------------------------------------------------
 
+/// Column widths for the sweep's parameter columns.
+///
+/// Wide enough to spell each parameter's name out, when the panel has the room
+/// for it — a swept parameter you cannot identify is not a result. When it does
+/// not, the columns share what is left equally and the names are ellipsised,
+/// which is at least uniform; below a floor of four they would be pure
+/// punctuation, so they stop shrinking and the table is allowed to run to the
+/// edge instead.
+fn param_widths(names: &[String], available: usize) -> Vec<usize> {
+    /// `score`, and the return/Sharpe/maxDD/trades tail, plus their gaps.
+    const FIXED: usize = 9 + 10 + 8 + 9 + 7;
+    /// Numbers are short; nothing useful is gained below this.
+    const MIN: usize = 4;
+
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let ideal: Vec<usize> = names.iter().map(|n| n.chars().count().max(MIN)).collect();
+    let spare = available.saturating_sub(FIXED);
+    let wanted: usize = ideal.iter().map(|w| w + 1).sum();
+
+    if wanted <= spare {
+        return ideal;
+    }
+    let each = (spare / names.len()).saturating_sub(1).max(MIN);
+    vec![each; names.len()]
+}
+
 fn draw_sweep(f: &mut Frame, area: Rect, app: &App) {
     let bt = &app.backtest;
     if bt.sweep.is_empty() {
@@ -579,15 +607,20 @@ fn draw_sweep(f: &mut Frame, area: Rect, app: &App) {
         .map(|s| s.params.keys().cloned().collect())
         .unwrap_or_default();
 
+    // Parameter columns are sized to their own names where the panel allows
+    // it. They used to be a flat nine columns, which turned every name longer
+    // than that into "overboug…" — a header that names nothing is worse than a
+    // narrower number beside it.
+    let widths = param_widths(&names, area.width as usize);
+
     let mut header = format!("{:>8} ", "score");
-    for n in &names {
-        header.push_str(&format!("{:>9} ", theme::truncate(n, 9)));
+    for (n, w) in names.iter().zip(&widths) {
+        header.push_str(&format!("{:>1$} ", theme::truncate(n, *w), w));
     }
     header.push_str(&format!(
         "{:>9} {:>7} {:>8} {:>7}",
         "return", "Sharpe", "maxDD", "trades"
     ));
-
     let mut lines = vec![Line::styled(header, theme::header_style())];
 
     let rows = area.height.saturating_sub(1) as usize;
@@ -600,9 +633,13 @@ fn draw_sweep(f: &mut Frame, area: Rect, app: &App) {
                 theme::muted()
             }),
         )];
-        for n in &names {
+        for (n, w) in names.iter().zip(&widths) {
             spans.push(Span::styled(
-                format!("{:>9} ", fmt_param(p.params.get(n).copied().unwrap_or(0.0))),
+                format!(
+                    "{:>1$} ",
+                    fmt_param(p.params.get(n).copied().unwrap_or(0.0)),
+                    w
+                ),
                 Style::default().fg(theme::fg()),
             ));
         }
@@ -742,7 +779,7 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
         hint(
             f,
             area,
-            "Press u to run this strategy across the market, or c to run it over the symbols on the Compare screen.\n\nOne symbol proves nothing — an edge that only works on the scrip you happened to be looking at is a coincidence. Note that delisted scrips are absent from PSX's symbol list, so these results are biased upward by survivorship.",
+            "Press u for the most liquid 150 symbols, U for every listed symbol (a few seconds, in the background), or c for the symbols on the Compare screen.\n\nOne symbol proves nothing — an edge that only works on the scrip you happened to be looking at is a coincidence. Note that delisted scrips are absent from PSX's symbol list, so these results are biased upward by survivorship.",
         );
         return;
     }
@@ -767,7 +804,7 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("symbols ", Style::default().fg(theme::muted())),
-                Span::styled(format!("{coverage:<8}"), Style::default().fg(theme::fg())),
+                Span::styled(format!("{coverage:<12}"), Style::default().fg(theme::fg())),
                 Span::styled("median ", Style::default().fg(theme::muted())),
                 Span::styled(
                     format!("{:<10}", theme::pct(s.median_return_pct)),
@@ -786,7 +823,7 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
             ]),
             Line::styled(
                 match scope {
-                    ScanScope::Market => {
+                    ScanScope::Market | ScanScope::All => {
                         "Survivorship: delisted scrips are not in PSX's symbol list, so this is biased upward."
                     }
                     ScanScope::Compare => {
@@ -901,6 +938,31 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every column in the sweep table must be identifiable. Parameter names
+    /// were fixed at nine columns, which rendered `overbought` as "overboug…"
+    /// — a header that names nothing.
+    #[test]
+    fn the_sweep_header_spells_out_every_column() {
+        let names: Vec<String> = ["overbought", "oversold", "rsi_period", "trend"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // A normal results panel: wide enough for the names in full.
+        let widths = param_widths(&names, 130);
+        assert_eq!(widths, vec![10, 8, 10, 5], "sized to the names");
+
+        // Cramped: shared equally rather than letting one name eat the table.
+        let narrow = param_widths(&names, 60);
+        assert!(narrow.iter().all(|w| *w >= 4), "never pure punctuation");
+        assert!(
+            narrow.iter().all(|w| *w <= widths[0]),
+            "and never wider than it would ideally be: {narrow:?}"
+        );
+
+        assert!(param_widths(&[], 130).is_empty());
+    }
 
     #[test]
     fn wrapping_breaks_on_word_boundaries() {

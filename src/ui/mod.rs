@@ -498,7 +498,10 @@ fn draw_help(f: &mut Frame) {
         section("Backtest"),
         bind("f", "move focus between strategies and parameters"),
         bind("j / k, ↑ ↓", "move within the focused panel"),
-        bind("← → , - +", "tweak the selected parameter (H / L by ten)"),
+        bind(
+            "← → , - +",
+            "tweak the parameter — takes focus (H / L by ten)",
+        ),
         bind("d", "reset parameters to the strategy's defaults"),
         bind("Enter", "run on the selected symbol"),
         bind("v / V", "cycle the results view"),

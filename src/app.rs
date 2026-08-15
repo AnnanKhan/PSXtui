@@ -2622,6 +2622,29 @@ impl App {
         *offset = (*offset as isize + delta).clamp(0, max as isize) as usize;
     }
 
+    /// Nudge the selected parameter, taking focus for the parameters panel as
+    /// it goes.
+    ///
+    /// Editing a parameter *is* working in that panel, and without this the
+    /// screen contradicted itself: ← and → edited the first parameter whatever
+    /// the focus was, while ↑ and ↓ still moved through the strategy list — so
+    /// the obvious "tweak this, now move to the next one" ended up selecting a
+    /// different strategy, which resets every parameter and threw the edit
+    /// away. Focus follows the edit instead.
+    ///
+    /// A strategy with no parameters keeps the focus it had: moving it to an
+    /// empty panel would leave the arrow keys with nothing to drive.
+    fn backtest_nudge(&mut self, steps: f64) {
+        let has_params = self
+            .backtest
+            .strategy()
+            .is_some_and(|s| !s.params.is_empty());
+        if has_params {
+            self.backtest.focus = BtFocus::Params;
+        }
+        self.backtest.nudge_param(steps);
+    }
+
     fn on_backtest_key(&mut self, key: KeyEvent) {
         match key.code {
             // Panel focus, so the arrow keys mean one thing at a time.
@@ -2661,12 +2684,10 @@ impl App {
             },
 
             // Tweaking. Shift moves ten steps, for a param with a wide range.
-            KeyCode::Left | KeyCode::Char('-') => self.backtest.nudge_param(-1.0),
-            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
-                self.backtest.nudge_param(1.0)
-            }
-            KeyCode::Char('H') => self.backtest.nudge_param(-10.0),
-            KeyCode::Char('L') => self.backtest.nudge_param(10.0),
+            KeyCode::Left | KeyCode::Char('-') => self.backtest_nudge(-1.0),
+            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => self.backtest_nudge(1.0),
+            KeyCode::Char('H') => self.backtest_nudge(-10.0),
+            KeyCode::Char('L') => self.backtest_nudge(10.0),
             KeyCode::Char('d') => {
                 self.backtest.reset_params();
                 self.backtest.invalidate();
@@ -2858,6 +2879,66 @@ mod tests {
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// Two strategies, each with two parameters, so both the strategy list and
+    /// the parameter list have somewhere to move to.
+    fn app_with_strategies() -> App {
+        let mut a = app();
+        a.screen = Screen::Backtest;
+        a.backtest.strategies = ["A", "B"]
+            .iter()
+            .map(|name| {
+                crate::backtest::Strategy::parse(&format!(
+                    r#"
+name = "{name}"
+[params]
+fast = {{ default = 10, min = 2, max = 50, step = 2 }}
+slow = {{ default = 30, min = 5, max = 200, step = 5 }}
+[rules]
+entry = "close > fast"
+exit = "close < fast"
+"#
+                ))
+                .unwrap()
+            })
+            .collect();
+        a.backtest.reset_params();
+        a
+    }
+
+    /// Tweaking a parameter and then pressing ↓ must reach the *next
+    /// parameter*, not a different strategy — which would discard the tweak
+    /// that was just made.
+    #[test]
+    fn editing_a_parameter_moves_focus_to_the_parameters_panel() {
+        let mut a = app_with_strategies();
+        assert_eq!(a.backtest.focus, BtFocus::Strategies, "starts on the list");
+
+        a.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(a.backtest.focus, BtFocus::Params, "the edit took focus");
+        assert_eq!(a.backtest.params["fast"], 12.0, "and landed on the param");
+
+        a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(a.backtest.param_cursor, 1, "down moves to the next param");
+        assert_eq!(a.backtest.selected, 0, "and leaves the strategy alone");
+        assert_eq!(a.backtest.params["fast"], 12.0, "so the tweak survives");
+
+        a.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(a.backtest.params["slow"], 35.0, "the second one now edits");
+    }
+
+    /// `f` still moves focus by hand, and the strategy list still scrolls.
+    #[test]
+    fn the_strategy_list_still_takes_the_arrow_keys_while_it_has_focus() {
+        let mut a = app_with_strategies();
+        a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(a.backtest.selected, 1, "down walks the strategy list");
+
+        a.on_key(key('f'));
+        assert_eq!(a.backtest.focus, BtFocus::Params);
+        a.on_key(key('f'));
+        assert_eq!(a.backtest.focus, BtFocus::Strategies);
     }
 
     #[test]

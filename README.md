@@ -234,7 +234,7 @@ Press `?` in the app for the full list.
 | `r` | Refresh · `q` quit |
 | `T` | Cycle colour theme (remembered between sessions) |
 | `M` | Mouse on/off (off restores terminal text selection) |
-| `f` / `←` `→` | Backtest: focus strategies or parameters / tweak the selected one |
+| `f` / `←` `→` | Backtest: focus strategies or parameters / tweak the selected one (tweaking moves focus to the parameters, so `↓` reaches the next one) |
 | `Enter` / `s` / `W` / `u` | Backtest: run · sweep parameters · walk forward · scan the market |
 
 ### Mouse

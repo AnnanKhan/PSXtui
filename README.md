@@ -305,11 +305,11 @@ Screen `0` runs a strategy over the full cached history — about five years and
 1,250 sessions per scrip — and shows what it would have done.
 
 Strategies are TOML files in the strategies directory
-([where things live](#where-things-live)). Eight well-known ones ship with the
+([where things live](#where-things-live)). Nine well-known ones ship with the
 binary and install themselves the first time you open the screen: Golden Cross,
 Connors RSI(2), Turtle breakout, MACD crossover, Bollinger reversion, absolute
-momentum, Wilder's ADX/DI system, and a triple-MA ribbon. Each file credits its
-source.
+momentum, Wilder's ADX/DI system, a triple-MA ribbon, and a five-check swing
+checklist. Each file credits its source.
 
 ```toml
 name = "Golden Cross"
@@ -342,8 +342,16 @@ operators `+ - * /`, `> >= < <= == !=`, `and`/`or`/`not`; and the functions
 `sma ema rsi atr obv cci williams_r macd macd_signal macd_hist bb_upper bb_mid
 bb_lower stoch_k stoch_d adx di_plus di_minus donchian_upper donchian_lower
 donchian_mid highest lowest change pct_change prev cross_above cross_below abs
-min max`. Everything is a whole aligned column, so an indicator's warm-up is
-`None` and a rule built on it is undefined rather than accidentally true.
+min max hammer bullish_engulfing morning_star`. Everything is a whole aligned
+column, so an indicator's warm-up is `None` and a rule built on it is undefined
+rather than accidentally true.
+
+The three candlestick patterns take no arguments — `hammer()` — and return `1`
+on the bar completing the pattern. They read intraday extremes, so see
+[true intraday range](#true-intraday-range) below: without the OHLC backfill,
+`hammer()` fires about a third as often as it should and `morning_star()`
+somewhat less often, while `bullish_engulfing()` reads only open and close and
+is unaffected.
 Optional top-level keys: `direction = "short"`, `stop_loss_pct`,
 `take_profit_pct`, `min_hold_bars`, and a `filter` rule that gates entries.
 

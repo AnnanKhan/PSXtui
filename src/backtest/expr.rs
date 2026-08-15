@@ -494,6 +494,9 @@ pub const FUNCTIONS: &[&str] = &[
     "abs",
     "min",
     "max",
+    "hammer",
+    "bullish_engulfing",
+    "morning_star",
 ];
 
 fn call(name: &str, args: &[Expr], ctx: &Context) -> Result<Series, ExprError> {
@@ -551,6 +554,17 @@ fn call(name: &str, args: &[Expr], ctx: &Context) -> Result<Series, ExprError> {
                 "adx" => out.adx,
                 "di_plus" => out.plus_di,
                 _ => out.minus_di,
+            };
+            return Ok(aligned(s, n));
+        }
+        // Candlestick patterns are shape statements about whole bars, so like
+        // `obv` they take no source column.
+        "hammer" | "bullish_engulfing" | "morning_star" => {
+            arity(0)?;
+            let s = match name {
+                "hammer" => indicators::hammer(ctx.bars),
+                "bullish_engulfing" => indicators::bullish_engulfing(ctx.bars),
+                _ => indicators::morning_star(ctx.bars),
             };
             return Ok(aligned(s, n));
         }
@@ -947,7 +961,7 @@ mod tests {
         let ctx = Context::new(&b);
         for f in FUNCTIONS {
             let src = match *f {
-                "obv" => "obv()".to_string(),
+                "obv" | "hammer" | "bullish_engulfing" | "morning_star" => format!("{f}()"),
                 "macd" | "macd_signal" | "macd_hist" => format!("{f}(close, 12, 26, 9)"),
                 "bb_upper" | "bb_mid" | "bb_lower" => format!("{f}(close, 20, 2)"),
                 "stoch_k" | "stoch_d" => format!("{f}(14, 3)"),

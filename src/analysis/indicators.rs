@@ -964,6 +964,135 @@ pub fn week52_position(bars: &[Bar]) -> Option<f64> {
     finite(((last.close - lo) / range).clamp(0.0, 1.0))
 }
 
+// ---------------------------------------------------------------------------
+// Candlestick reversal patterns
+// ---------------------------------------------------------------------------
+//
+// These return a flag column — `1.0` on the bar that completes the pattern,
+// `0.0` elsewhere, `None` through the warm-up — so a strategy rule can combine
+// them with `and`/`or` like any other series.
+//
+// A warning that applies to all three: they are only as good as the high and
+// low they read. PSX's long-run EOD feed carries no intraday extremes, so on a
+// database that has not run the `/historical` OHLC backfill the shadows are
+// synthesised from open and close and every shadow-based pattern here is
+// fiction. `bullish_engulfing` is the exception — it reads only open and
+// close, so it is honest either way.
+
+/// `true` if every OHLC field of the bar is finite and the bar is not degenerate.
+fn usable(b: &Bar) -> bool {
+    b.open.is_finite()
+        && b.high.is_finite()
+        && b.low.is_finite()
+        && b.close.is_finite()
+        && b.high >= b.low
+}
+
+/// The filled part of the candle — `|close - open|`.
+fn body(b: &Bar) -> f64 {
+    (b.close - b.open).abs()
+}
+
+/// Hammer — a long lower shadow under a small body at the top of the range.
+///
+/// The reading is that sellers drove price well below the open and were fully
+/// rejected before the close, which is why it only means anything at the
+/// bottom of a pullback. Standard proportions: the lower shadow is at least
+/// `2x` the body, and the upper shadow is no more than half the body.
+///
+/// Colour is deliberately not required. A green hammer is the stronger signal,
+/// but the classical pattern admits either, and on a market with a ±10% limit
+/// insisting on colour throws away a lot of valid bars.
+pub fn hammer(bars: &[Bar]) -> Vec<Option<f64>> {
+    bars.iter()
+        .map(|b| {
+            if !usable(b) {
+                return None;
+            }
+            let range = b.high - b.low;
+            if range <= 0.0 {
+                // A locked or untraded session: no shape to read.
+                return Some(0.0);
+            }
+            let body = body(b);
+            let lower = b.open.min(b.close) - b.low;
+            let upper = b.high - b.open.max(b.close);
+
+            // A doji with no body at all would satisfy any ratio test, so the
+            // body is measured against the range instead of against itself.
+            let has_body = body >= range * 0.05;
+            Some(f64::from(
+                has_body && lower >= body * 2.0 && upper <= body * 0.5,
+            ))
+        })
+        .collect()
+}
+
+/// Bullish engulfing — a down bar wholly swallowed by the next bar's up body.
+///
+/// Two bars: the first closes below its open, the second opens at or below the
+/// first's close and closes at or above the first's open. One session undoes
+/// the whole of the previous one, which is the cleanest evidence of a handover
+/// from sellers to buyers that two candles can give.
+///
+/// The first bar is `None`; there is nothing to engulf.
+pub fn bullish_engulfing(bars: &[Bar]) -> Vec<Option<f64>> {
+    let mut out = undefined(bars.len());
+    for i in 1..bars.len() {
+        let (prev, cur) = (&bars[i - 1], &bars[i]);
+        if !usable(prev) || !usable(cur) {
+            continue;
+        }
+        let prev_down = prev.close < prev.open;
+        let cur_up = cur.close > cur.open;
+        let engulfs = cur.open <= prev.close && cur.close >= prev.open;
+        // Guards against a pair of near-doji bars technically engulfing each
+        // other while saying nothing about supply.
+        let meaningful = body(cur) > body(prev) && body(cur) > 0.0;
+        out[i] = Some(f64::from(prev_down && cur_up && engulfs && meaningful));
+    }
+    out
+}
+
+/// Morning star — a down bar, a small indecisive bar, then a strong up bar
+/// closing back above the midpoint of the first.
+///
+/// The three-bar version of the same story the hammer tells in one: decline,
+/// stall, reversal. The middle bar's body must be small relative to the first,
+/// which is what distinguishes a genuine pause from a continuation.
+///
+/// The textbook pattern also wants the middle bar to gap away from both
+/// neighbours. That requirement is dropped here: daily equity bars gap far
+/// less often than the intraday charts the rule was written for, and requiring
+/// it reduces the pattern to a handful of occurrences per decade.
+///
+/// The first two bars are `None`.
+pub fn morning_star(bars: &[Bar]) -> Vec<Option<f64>> {
+    let mut out = undefined(bars.len());
+    for i in 2..bars.len() {
+        let (first, middle, last) = (&bars[i - 2], &bars[i - 1], &bars[i]);
+        if !usable(first) || !usable(middle) || !usable(last) {
+            continue;
+        }
+        let first_body = body(first);
+        if first_body <= 0.0 {
+            out[i] = Some(0.0);
+            continue;
+        }
+
+        let first_down = first.close < first.open;
+        let middle_small = body(middle) <= first_body * 0.5;
+        let last_up = last.close > last.open;
+        // Recovering half of the first bar is the usual bar for calling the
+        // reversal confirmed rather than merely started.
+        let midpoint = (first.open + first.close) / 2.0;
+        let recovers = last.close > midpoint;
+
+        out[i] = Some(f64::from(first_down && middle_small && last_up && recovers));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1914,5 +2043,133 @@ mod tests {
         assert_all_finite(&williams_r(&one, 1));
         assert_all_finite(&donchian(&one, 1).middle);
         assert_all_finite(&ichimoku(&one, 1, 1, 1).span_a);
+    }
+
+    // -- candlestick patterns ---------------------------------------------
+
+    /// `true` where the pattern column is set.
+    fn hits(series: &[Option<f64>]) -> Vec<bool> {
+        series
+            .iter()
+            .map(|v| matches!(v, Some(x) if *x != 0.0))
+            .collect()
+    }
+
+    #[test]
+    fn hammer_needs_a_long_lower_shadow_under_a_small_body() {
+        let bars = vec![
+            // Textbook hammer: body 1.0 at the top, lower shadow 4.0, no upper.
+            bar(0, 100.0, 101.0, 96.0, 101.0, 1.0),
+            // Same shape inverted — a shooting star, not a hammer.
+            bar(1, 100.0, 105.0, 99.0, 99.5, 1.0),
+            // Long lower shadow but an equally long body: not a hammer.
+            bar(2, 104.0, 104.5, 96.0, 100.0, 1.0),
+            // A doji: no body to measure the shadow against.
+            bar(3, 100.0, 100.2, 96.0, 100.0, 1.0),
+        ];
+        assert_eq!(hits(&hammer(&bars)), vec![true, false, false, false]);
+    }
+
+    #[test]
+    fn a_limit_locked_bar_is_not_a_hammer() {
+        // A zero-range session would otherwise divide by zero or satisfy every
+        // ratio test trivially. PSX locks at ±10% often enough to matter.
+        let bars = vec![flat_bar(0, 100.0, 1.0), flat_bar(1, 110.0, 1.0)];
+        assert_eq!(hits(&hammer(&bars)), vec![false, false]);
+    }
+
+    #[test]
+    fn bullish_engulfing_needs_the_second_body_to_swallow_the_first() {
+        let bars = vec![
+            bar(0, 100.0, 100.5, 97.0, 98.0, 1.0),   // down bar
+            bar(1, 97.5, 101.5, 97.0, 101.0, 1.0),   // engulfs it
+            bar(2, 101.0, 102.0, 100.0, 100.5, 1.0), // down bar
+            bar(3, 100.6, 101.2, 100.4, 101.0, 1.0), // up, but does not reach the open
+        ];
+        let h = hits(&bullish_engulfing(&bars));
+        // The first bar has nothing before it to engulf.
+        assert_eq!(bullish_engulfing(&bars)[0], None);
+        assert!(h[1], "a body spanning the previous one should count");
+        assert!(!h[3], "a body inside the previous one should not");
+    }
+
+    #[test]
+    fn bullish_engulfing_reads_only_open_and_close() {
+        // The pattern must be unaffected by high/low, which is what makes it
+        // the one candle rule that survives PSX's derived intraday range.
+        let real = vec![
+            bar(0, 100.0, 103.0, 95.0, 98.0, 1.0),
+            bar(1, 97.5, 104.0, 94.0, 101.0, 1.0),
+        ];
+        let derived: Vec<Bar> = real
+            .iter()
+            .map(|b| {
+                bar(
+                    b.ts,
+                    b.open,
+                    b.open.max(b.close),
+                    b.open.min(b.close),
+                    b.close,
+                    b.volume,
+                )
+            })
+            .collect();
+        assert_eq!(
+            hits(&bullish_engulfing(&real)),
+            hits(&bullish_engulfing(&derived))
+        );
+    }
+
+    #[test]
+    fn morning_star_needs_a_small_middle_and_a_recovering_third() {
+        let down = bar(0, 100.0, 100.5, 93.0, 94.0, 1.0);
+        let small = bar(1, 93.8, 94.5, 93.0, 93.5, 1.0);
+        // Closes above the midpoint of the first body (97.0).
+        let up = bar(2, 94.0, 98.5, 93.9, 98.0, 1.0);
+        assert!(hits(&morning_star(&[down, small, up]))[2]);
+
+        // A third bar that recovers only part of the way is not a reversal.
+        let weak = bar(2, 94.0, 96.0, 93.9, 95.5, 1.0);
+        assert!(!hits(&morning_star(&[down, small, weak]))[2]);
+
+        // A large middle bar makes it a continuation, not a pause.
+        let big = bar(1, 94.0, 94.2, 88.0, 88.5, 1.0);
+        assert!(!hits(&morning_star(&[down, big, up]))[2]);
+    }
+
+    #[test]
+    fn candle_patterns_are_aligned_and_warm_up_cleanly() {
+        let bars: Vec<Bar> = (0..30)
+            .map(|i| {
+                let t = i as f64;
+                bar(i, 100.0 + t, 102.0 + t, 98.0 + t, 101.0 + t, 1_000.0)
+            })
+            .collect();
+        for (name, s) in [
+            ("hammer", hammer(&bars)),
+            ("bullish_engulfing", bullish_engulfing(&bars)),
+            ("morning_star", morning_star(&bars)),
+        ] {
+            assert_eq!(s.len(), bars.len(), "{name} returned a misaligned column");
+            assert!(
+                s.iter().flatten().all(|v| *v == 0.0 || *v == 1.0),
+                "{name} produced something other than a flag"
+            );
+        }
+        // Nothing to compare against on the very first bars.
+        assert_eq!(bullish_engulfing(&bars)[0], None);
+        assert_eq!(morning_star(&bars)[0], None);
+        assert_eq!(morning_star(&bars)[1], None);
+    }
+
+    #[test]
+    fn candle_patterns_survive_degenerate_input() {
+        assert!(hammer(&[]).is_empty());
+        assert!(bullish_engulfing(&[]).is_empty());
+        assert!(morning_star(&[]).is_empty());
+
+        let nan = bar(0, f64::NAN, f64::NAN, f64::NAN, f64::NAN, 0.0);
+        assert_eq!(hammer(&[nan]), vec![None]);
+        assert_eq!(morning_star(&[nan, nan, nan])[2], None);
     }
 }

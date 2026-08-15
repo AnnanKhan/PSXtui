@@ -17,11 +17,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::backtest;
+use crate::backtest::optimize;
 use crate::cache::Store;
 use crate::ext::{Headline, MacroRates, MacroSeries};
 use crate::model::{Bar, Company, Index, Quote, SymbolInfo, Tick};
 use crate::ui::hit::{HitMap, Target, Toggle, Zone};
-use backtest_state::{BacktestState, Focus as BtFocus, View as BtView};
+use backtest_state::{BacktestState, Focus as BtFocus, ScanScope, View as BtView};
 
 /// The benchmark every risk statistic is measured against.
 pub const BENCHMARK: &str = "KSE100";
@@ -153,6 +154,25 @@ impl Screen {
         Screen::Macro,
         Screen::Backtest,
     ];
+
+    /// Whether this screen is about one symbol.
+    ///
+    /// Used when a search commits: from a screen that already shows a single
+    /// scrip, "find me another one" means show *that* screen for the new
+    /// symbol, not jump to the chart and make the user navigate back. From a
+    /// board — the dashboard, the screener, the macro page — there is no such
+    /// context to keep, and the chart is what a search is for.
+    pub fn is_symbol_scoped(&self) -> bool {
+        matches!(
+            self,
+            Screen::Chart
+                | Screen::Analysis
+                | Screen::Company
+                | Screen::Intraday
+                | Screen::Seasonality
+                | Screen::Backtest
+        )
+    }
 
     pub fn title(&self) -> &'static str {
         match self {
@@ -833,6 +853,12 @@ pub struct App {
     pub watchlist: BTreeSet<String>,
     /// `Some` while the search prompt is open.
     pub search: Option<String>,
+    /// The screen the search was opened from.
+    ///
+    /// Opening one moves to the Screener so the matches are visible, so by the
+    /// time it commits the app no longer knows where the user came from — and
+    /// that is exactly what decides where they should end up.
+    search_from: Option<Screen>,
     /// Restrict the screener to one sector, set by drilling through the
     /// dashboard heatmap. Cleared with Esc.
     pub sector_filter: Option<String>,
@@ -894,6 +920,7 @@ impl App {
             fundamentals,
             watchlist,
             search: None,
+            search_from: None,
             sector_filter: None,
             show_help: false,
             status: "Loading market data…".into(),
@@ -1027,6 +1054,9 @@ impl App {
         self.bars.clear();
         self.company = None;
         self.announcement_cursor = 0;
+        // A backtest describes the scrip it ran on. Keeping it across a symbol
+        // change would put the new name over the old numbers.
+        self.backtest.invalidate_symbol();
         self.needs_cache_load = true;
     }
 
@@ -1430,16 +1460,29 @@ impl App {
         // The search prompt swallows most keys while it is open.
         if let Some(query) = self.search.as_mut() {
             match key.code {
-                KeyCode::Esc => self.search = None,
+                KeyCode::Esc => {
+                    self.search = None;
+                    self.search_from = None;
+                }
                 KeyCode::Enter => {
                     // Commit: jump to the first match.
                     if let Some(q) = self.visible_quotes().first() {
                         let sym = q.symbol.clone();
+                        let from = self.search_from.take();
                         self.search = None;
                         self.select(sym);
-                        self.screen = Screen::Chart;
+                        // Go back to where the search started when that screen
+                        // is about a single symbol — from the backtester, "/"
+                        // means "run this on that one instead". From a board
+                        // there is no such context, and the chart is what a
+                        // search is for.
+                        self.screen = match from {
+                            Some(s) if s.is_symbol_scoped() => s,
+                            _ => Screen::Chart,
+                        };
                     } else {
                         self.search = None;
+                        self.search_from = None;
                     }
                 }
                 KeyCode::Backspace => {
@@ -1498,6 +1541,7 @@ impl App {
             KeyCode::Char('/') if self.screen == Screen::Compare => self.compare_picker_open(),
             KeyCode::Char('/') => {
                 self.search = Some(String::new());
+                self.search_from = Some(self.screen);
                 self.screen = Screen::Screener;
             }
             KeyCode::Char('r') => {
@@ -2597,13 +2641,6 @@ impl App {
 
     /// Run the strategy across the most liquid symbols.
     fn backtest_scan(&mut self) {
-        let Some(strategy) = self.backtest.strategy() else {
-            return;
-        };
-        let strategy = strategy.clone();
-        let params = self.backtest.params.clone();
-        let config = self.backtest.config;
-
         // Most liquid first: a strategy's behaviour on an untradeable scrip
         // that prints twice a month is noise, and scanning all 1,100 symbols
         // would stall the frame.
@@ -2624,17 +2661,65 @@ impl App {
             return;
         }
 
+        // A market scan asks which symbols the rule fires on at all, so the
+        // ones it never fired on are left out.
+        self.backtest_run_scan(&symbols, ScanScope::Market, optimize::Silent::Drop);
+    }
+
+    /// Run the strategy over exactly the symbols on the Compare screen.
+    ///
+    /// The market scan answers "does this rule work anywhere"; this answers
+    /// "how would it have done on the scrips I am actually looking at", which
+    /// is the question anyone comparing eight symbols already has in mind.
+    fn backtest_compare_scan(&mut self) {
+        let symbols = self.compare_symbols();
+        if symbols.is_empty() {
+            self.backtest.error =
+                Some("No symbols on the Compare screen yet — add some with a there.".into());
+            return;
+        }
+
+        // Every named symbol keeps its row, including one the strategy never
+        // touched: the user chose these, and a blank where a scrip should be
+        // reads as a bug rather than as an answer.
+        self.backtest_run_scan(&symbols, ScanScope::Compare, optimize::Silent::Keep);
+    }
+
+    /// The half both scans share: run, summarise, and show the table.
+    fn backtest_run_scan(
+        &mut self,
+        symbols: &[String],
+        scope: ScanScope,
+        silent: optimize::Silent,
+    ) {
+        let Some(strategy) = self.backtest.strategy() else {
+            return;
+        };
+        let strategy = strategy.clone();
+        let params = self.backtest.params.clone();
+        let config = self.backtest.config;
+
         let store = self.store.clone();
-        let rows = backtest::optimize::scan(&strategy, &params, &symbols, &config, |sym| {
+        let rows = optimize::scan(&strategy, &params, symbols, &config, silent, |sym| {
+            // The selected symbol's history is already in memory; everything
+            // else comes from the cache, and a render must never fetch.
+            if sym == self.selected && !self.bars.is_empty() {
+                return Some(self.bars.clone());
+            }
             store.bars(sym, None).ok().filter(|b| !b.is_empty())
         });
 
-        self.backtest.scan_summary = backtest::optimize::summarize(&rows);
+        self.backtest.scan_summary = optimize::summarize(&rows);
         self.status = format!(
-            "Scanned {} symbols; {} profitable",
-            self.backtest.scan_summary.symbols, self.backtest.scan_summary.profitable
+            "{}: ran {} of {} symbols; {} profitable",
+            scope.label(),
+            rows.len(),
+            symbols.len(),
+            self.backtest.scan_summary.profitable
         );
         self.backtest.scan = rows;
+        self.backtest.scan_scope = scope;
+        self.backtest.scan_asked = symbols.len();
         self.backtest.scan_offset = 0;
         self.backtest.view = BtView::Scan;
     }
@@ -2732,6 +2817,7 @@ impl App {
             KeyCode::Char('b') => self.backtest_take_best(),
             KeyCode::Char('W') => self.backtest_walk_forward(),
             KeyCode::Char('u') => self.backtest_scan(),
+            KeyCode::Char('c') => self.backtest_compare_scan(),
             KeyCode::Char('o') => {
                 self.backtest.cycle_objective();
                 self.status = format!("Ranking by {}", self.backtest.objective.label());
@@ -2914,6 +3000,24 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
+    /// A series with enough movement for a crossover rule to fire.
+    fn trending_bars() -> Vec<Bar> {
+        (0..400)
+            .map(|i| {
+                let t = i as f64;
+                let c = 50.0 + (t / 20.0).sin() * 20.0;
+                Bar {
+                    ts: 1_600_000_000 + i as i64 * 86_400,
+                    open: c,
+                    high: c * 1.01,
+                    low: c * 0.99,
+                    close: c,
+                    volume: 1_000.0,
+                }
+            })
+            .collect()
+    }
+
     /// Two strategies, each with two parameters, so both the strategy list and
     /// the parameter list have somewhere to move to.
     fn app_with_strategies() -> App {
@@ -2959,6 +3063,114 @@ exit = "close < fast"
 
         a.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert_eq!(a.backtest.params["slow"], 35.0, "the second one now edits");
+    }
+
+    /// `c` runs the strategy over exactly the Compare set, and every symbol
+    /// named there keeps a row — including one the rule never fired on.
+    #[test]
+    fn c_scans_the_compare_set_and_keeps_every_symbol_in_it() {
+        let mut a = app_with_strategies();
+        a.selected = "AAA".into();
+        a.compare.symbols = vec!["AAA".into(), "BBB".into()];
+
+        // AAA trends enough to cross a moving average; BBB never moves.
+        // AAA swings enough to cross a moving average; BBB never moves, so the
+        // rule cannot fire on it.
+        a.store.put_eod_bars("AAA", &trending_bars()).unwrap();
+        let flat: Vec<Bar> = trending_bars()
+            .into_iter()
+            .map(|b| Bar {
+                open: 50.0,
+                high: 50.0,
+                low: 50.0,
+                close: 50.0,
+                ..b
+            })
+            .collect();
+        a.store.put_eod_bars("BBB", &flat).unwrap();
+
+        a.on_key(key('c'));
+
+        assert_eq!(a.backtest.view, BtView::Scan, "the table is shown");
+        assert_eq!(a.backtest.scan_scope, ScanScope::Compare);
+        assert_eq!(a.backtest.scan_asked, 2);
+        let names: Vec<&str> = a.backtest.scan.iter().map(|r| r.symbol.as_str()).collect();
+        assert!(
+            names.contains(&"AAA") && names.contains(&"BBB"),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn scanning_the_compare_set_needs_a_compare_set() {
+        let mut a = app_with_strategies();
+        a.compare.symbols.clear();
+        a.selected.clear();
+        a.on_key(key('c'));
+        assert!(
+            a.backtest.error.is_some(),
+            "an empty set must say so, not show an empty table"
+        );
+    }
+
+    /// A report describes the scrip it ran on, so changing symbol must drop it
+    /// rather than leave the new name over the old numbers. A scan is not about
+    /// the selected symbol and survives.
+    #[test]
+    fn changing_symbol_drops_the_report_but_keeps_a_scan() {
+        let mut a = app_with_strategies();
+        a.selected = "AAA".into();
+        a.compare.symbols = vec!["AAA".into()];
+        let bars = trending_bars();
+        a.store.put_eod_bars("AAA", &bars).unwrap();
+        a.on_event(DataEvent::Bars {
+            symbol: "AAA".into(),
+            bars,
+        });
+
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(a.backtest.report.is_some(), "ran on AAA");
+        a.on_key(key('c'));
+        assert!(!a.backtest.scan.is_empty(), "and scanned the compare set");
+
+        a.select("BBB".into());
+
+        assert!(a.backtest.report.is_none(), "the equity curve was AAA's");
+        assert!(
+            !a.backtest.scan.is_empty(),
+            "the scan was nobody's in particular"
+        );
+    }
+
+    /// Searching from a screen that is about one symbol should stay on it:
+    /// from the backtester, "/" means "run this on that one instead".
+    #[test]
+    fn a_search_committed_from_a_symbol_screen_stays_there() {
+        let mut a = app();
+        a.on_event(DataEvent::Quotes(vec![
+            quote("HBL", 100.0, 1.0, 10.0),
+            quote("OGDC", 200.0, 1.0, 20.0),
+        ]));
+
+        a.screen = Screen::Backtest;
+        a.on_key(key('/'));
+        for c in "hbl".chars() {
+            a.on_key(key(c));
+        }
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.selected, "HBL");
+        assert_eq!(a.screen, Screen::Backtest, "stayed on the backtester");
+
+        // From a board there is no symbol context to keep, so the chart is
+        // still where a search lands.
+        a.screen = Screen::Dashboard;
+        a.on_key(key('/'));
+        for c in "ogdc".chars() {
+            a.on_key(key(c));
+        }
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.selected, "OGDC");
+        assert_eq!(a.screen, Screen::Chart);
     }
 
     /// `f` still moves focus by hand, and the strategy list still scrolls.

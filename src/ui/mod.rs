@@ -495,6 +495,7 @@ fn draw_help(f: &mut Frame) {
         bind("b", "adopt the best swept parameters"),
         bind("W", "walk forward — the only out-of-sample number"),
         bind("u", "run across the market"),
+        bind("c", "run across the Compare screen's symbols"),
         bind("o", "cycle what a sweep ranks by"),
         bind("i / R", "install bundled strategies / reload from disk"),
         bind("O", "fetch true intraday high/low for the whole history"),

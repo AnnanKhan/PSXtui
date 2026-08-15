@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use super::paint::{self, Paint};
 use super::{theme, widgets};
 use crate::app::App;
-use crate::app::backtest_state::{Focus, View};
+use crate::app::backtest_state::{Focus, ScanScope, View};
 use crate::backtest::{Report, TradeExit};
 use crate::cache::trading_day;
 
@@ -742,7 +742,7 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
         hint(
             f,
             area,
-            "Press u to run this strategy across the market.\n\nOne symbol proves nothing — an edge that only works on the scrip you happened to be looking at is a coincidence. Note that delisted scrips are absent from PSX's symbol list, so these results are biased upward by survivorship.",
+            "Press u to run this strategy across the market, or c to run it over the symbols on the Compare screen.\n\nOne symbol proves nothing — an edge that only works on the scrip you happened to be looking at is a coincidence. Note that delisted scrips are absent from PSX's symbol list, so these results are biased upward by survivorship.",
         );
         return;
     }
@@ -751,11 +751,23 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
         Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
 
     let s = &bt.scan_summary;
+    let scope = bt.scan_scope;
+    // "8 of 8" reads as complete; "6 of 8" says two symbols had too little
+    // history to run, which is a fact about the basket, not a rendering gap.
+    let coverage = if bt.scan_asked > s.symbols {
+        format!("{} of {}", s.symbols, bt.scan_asked)
+    } else {
+        s.symbols.to_string()
+    };
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
+                Span::styled(
+                    format!("{:<13}", scope.label()),
+                    Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("symbols ", Style::default().fg(theme::muted())),
-                Span::styled(format!("{:<8}", s.symbols), Style::default().fg(theme::fg())),
+                Span::styled(format!("{coverage:<8}"), Style::default().fg(theme::fg())),
                 Span::styled("median ", Style::default().fg(theme::muted())),
                 Span::styled(
                     format!("{:<10}", theme::pct(s.median_return_pct)),
@@ -773,7 +785,14 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
                 ),
             ]),
             Line::styled(
-                "Survivorship: delisted scrips are not in PSX's symbol list, so this is biased upward.",
+                match scope {
+                    ScanScope::Market => {
+                        "Survivorship: delisted scrips are not in PSX's symbol list, so this is biased upward."
+                    }
+                    ScanScope::Compare => {
+                        "These symbols were hand-picked, so this measures the strategy on your selection, not the market."
+                    }
+                },
                 Style::default().fg(theme::warn()),
             ),
         ]),
@@ -790,27 +809,49 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
 
     let rows = rows_area.height.saturating_sub(1) as usize;
     for row in bt.scan.iter().skip(bt.scan_offset).take(rows) {
+        // A kept row with no trades means the rule never fired on that scrip.
+        // Its "return" is zero only because nothing happened, so the strategy
+        // columns are dashed rather than printed as a result — buy-and-hold
+        // still is one, and is what the row is there to be read against.
+        let silent = row.trade_count == 0;
+        let dash = |width: usize| format!("{:>width$} ", "—");
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<12} ", theme::truncate(&row.symbol, 12)),
                 Style::default()
-                    .fg(theme::fg())
+                    .fg(if silent { theme::muted() } else { theme::fg() })
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:>10} ", theme::pct(row.total_return_pct)),
-                Style::default().fg(theme::change_color(row.total_return_pct)),
+                if silent {
+                    dash(10)
+                } else {
+                    format!("{:>10} ", theme::pct(row.total_return_pct))
+                },
+                Style::default().fg(if silent {
+                    theme::dim()
+                } else {
+                    theme::change_color(row.total_return_pct)
+                }),
             ),
             Span::styled(
                 format!("{:>10} ", theme::pct(row.buy_hold_return_pct)),
                 Style::default().fg(theme::dim()),
             ),
             Span::styled(
-                format!("{:>8} ", format!("{:.2}", row.sharpe)),
+                if silent {
+                    dash(8)
+                } else {
+                    format!("{:>8} ", format!("{:.2}", row.sharpe))
+                },
                 Style::default().fg(theme::fg()),
             ),
             Span::styled(
-                format!("{:>9} ", theme::pct_plain(row.max_drawdown_pct)),
+                if silent {
+                    dash(9)
+                } else {
+                    format!("{:>9} ", theme::pct_plain(row.max_drawdown_pct))
+                },
                 Style::default().fg(theme::down()),
             ),
             Span::styled(
@@ -818,7 +859,11 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(theme::muted()),
             ),
             Span::styled(
-                format!("{:>6.0}", row.win_rate_pct),
+                if silent {
+                    "     —".to_string()
+                } else {
+                    format!("{:>6.0}", row.win_rate_pct)
+                },
                 Style::default().fg(theme::muted()),
             ),
         ]));
@@ -950,6 +995,7 @@ mod tests {
             &params,
             &["AAA".to_string(), "BBB".to_string()],
             &config,
+            crate::backtest::optimize::Silent::Drop,
             |_| Some(bars(600)),
         );
         full.backtest.scan_summary = crate::backtest::optimize::summarize(&full.backtest.scan);

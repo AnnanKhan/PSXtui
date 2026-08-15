@@ -314,11 +314,24 @@ pub struct ScanRow {
 /// symbol happened to be on screen. Note the survivorship caveat: PSX's symbol
 /// list carries currently-listed scrips only, so delisted names are missing
 /// and every aggregate here is biased upward.
+/// What to do with a symbol the strategy never traded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Silent {
+    /// Leave it out. Right for a market-wide scan, where the question is which
+    /// symbols the rule fires on and a hundred empty rows answer nothing.
+    Drop,
+    /// Keep it, with a zero trade count. Right for a hand-picked basket: the
+    /// user named these symbols, and "your rule never fired on this one" is a
+    /// result they asked for, not noise to be filtered out.
+    Keep,
+}
+
 pub fn scan<F>(
     strategy: &Strategy,
     params: &HashMap<String, f64>,
     symbols: &[String],
     config: &Config,
+    silent: Silent,
     mut bars_for: F,
 ) -> Vec<ScanRow>
 where
@@ -337,7 +350,7 @@ where
         let Ok(r) = engine::run(strategy, &bars, params, config) else {
             continue;
         };
-        if r.trade_count == 0 {
+        if r.trade_count == 0 && silent == Silent::Drop {
             continue;
         }
         rows.push(ScanRow {
@@ -564,7 +577,7 @@ exit = "close < a"
     fn a_scan_skips_symbols_with_too_little_history() {
         let s = crossover();
         let symbols = vec!["LONG".to_string(), "SHORT".to_string()];
-        let rows = scan(&s, &s.defaults(), &symbols, &cfg(), |sym| {
+        let rows = scan(&s, &s.defaults(), &symbols, &cfg(), Silent::Drop, |sym| {
             Some(if sym == "LONG" { wavy(400) } else { wavy(10) })
         });
         assert!(rows.iter().all(|r| r.symbol == "LONG"));
@@ -574,10 +587,50 @@ exit = "close < a"
     fn a_scan_is_ranked_by_return() {
         let s = crossover();
         let symbols: Vec<String> = (0..5).map(|i| format!("S{i}")).collect();
-        let rows = scan(&s, &s.defaults(), &symbols, &cfg(), |_| Some(wavy(400)));
+        let rows = scan(&s, &s.defaults(), &symbols, &cfg(), Silent::Drop, |_| {
+            Some(wavy(400))
+        });
         for w in rows.windows(2) {
             assert!(w[0].total_return_pct >= w[1].total_return_pct);
         }
+    }
+
+    /// A hand-picked basket keeps every symbol it was given, including one the
+    /// strategy never traded — the user named it, so "never fired" is the
+    /// answer, not a row to drop.
+    #[test]
+    fn keeping_silent_symbols_reports_them_with_no_trades() {
+        let s = crossover();
+        let symbols = vec!["TRADES".to_string(), "FLAT".to_string()];
+
+        // A flat series gives a moving-average rule nothing to cross.
+        let flat: Vec<Bar> = (0..400)
+            .map(|i| Bar {
+                ts: 1_600_000_000 + i as i64 * 86_400,
+                open: 50.0,
+                high: 50.0,
+                low: 50.0,
+                close: 50.0,
+                volume: 1_000.0,
+            })
+            .collect();
+        let bars_for = |sym: &str| {
+            Some(if sym == "TRADES" {
+                wavy(400)
+            } else {
+                flat.clone()
+            })
+        };
+
+        let dropped = scan(&s, &s.defaults(), &symbols, &cfg(), Silent::Drop, bars_for);
+        assert_eq!(dropped.len(), 1, "a market scan leaves the silent one out");
+        assert_eq!(dropped[0].symbol, "TRADES");
+
+        let kept = scan(&s, &s.defaults(), &symbols, &cfg(), Silent::Keep, bars_for);
+        assert_eq!(kept.len(), 2, "a basket keeps both: {kept:?}");
+        let flat_row = kept.iter().find(|r| r.symbol == "FLAT").unwrap();
+        assert_eq!(flat_row.trade_count, 0, "and says why it is empty");
+        assert_eq!(flat_row.total_return_pct, 0.0);
     }
 
     #[test]

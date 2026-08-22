@@ -139,6 +139,14 @@ impl Worker {
                     tokio::spawn(self.clone().run_deep_backfill());
                 }
                 DataRequest::RefreshExternal => self.refresh_external().await,
+                DataRequest::ScanUniverse {
+                    strategy,
+                    params,
+                    config,
+                    symbols,
+                } => {
+                    tokio::spawn(self.clone().run_scan(*strategy, params, config, symbols));
+                }
             }
         }
     }
@@ -147,6 +155,41 @@ impl Worker {
     pub async fn run_backfill(self, days: i64) {
         self.backfill(days).await;
         self.emit(DataEvent::BackfillDone);
+    }
+
+    /// Run a strategy across `symbols` and hand the rows back.
+    ///
+    /// On a blocking thread: this is seconds of arithmetic and cache reads with
+    /// no await in it, and leaving it on the runtime would stall every timer
+    /// the app has — including the one that redraws the frame telling the user
+    /// it is working.
+    async fn run_scan(
+        self,
+        strategy: crate::backtest::Strategy,
+        params: std::collections::HashMap<String, f64>,
+        config: crate::backtest::Config,
+        symbols: Vec<String>,
+    ) {
+        let label = format!("scan of {} symbols", symbols.len());
+        self.emit(DataEvent::Begin(label.clone()));
+
+        let store = self.store.clone();
+        let asked = symbols.len();
+        let rows = tokio::task::spawn_blocking(move || {
+            crate::backtest::optimize::scan(
+                &strategy,
+                &params,
+                &symbols,
+                &config,
+                crate::backtest::optimize::Silent::Drop,
+                |sym| store.bars(sym, None).ok().filter(|b| !b.is_empty()),
+            )
+        })
+        .await
+        .unwrap_or_default();
+
+        self.emit(DataEvent::End(label));
+        self.emit(DataEvent::ScanRows { rows, asked });
     }
 
     /// Fill in true high/low for every cached session still missing it.

@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use super::paint::{self, Paint};
 use super::{theme, widgets};
 use crate::app::App;
-use crate::app::backtest_state::{Focus, View};
+use crate::app::backtest_state::{Focus, ScanScope, View};
 use crate::backtest::{Report, TradeExit};
 use crate::cache::trading_day;
 
@@ -563,6 +563,34 @@ fn draw_trades(f: &mut Frame, area: Rect, app: &App) {
 
 // --- sweep ----------------------------------------------------------------
 
+/// Column widths for the sweep's parameter columns.
+///
+/// Wide enough to spell each parameter's name out, when the panel has the room
+/// for it — a swept parameter you cannot identify is not a result. When it does
+/// not, the columns share what is left equally and the names are ellipsised,
+/// which is at least uniform; below a floor of four they would be pure
+/// punctuation, so they stop shrinking and the table is allowed to run to the
+/// edge instead.
+fn param_widths(names: &[String], available: usize) -> Vec<usize> {
+    /// `score`, and the return/Sharpe/maxDD/trades tail, plus their gaps.
+    const FIXED: usize = 9 + 10 + 8 + 9 + 7;
+    /// Numbers are short; nothing useful is gained below this.
+    const MIN: usize = 4;
+
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let ideal: Vec<usize> = names.iter().map(|n| n.chars().count().max(MIN)).collect();
+    let spare = available.saturating_sub(FIXED);
+    let wanted: usize = ideal.iter().map(|w| w + 1).sum();
+
+    if wanted <= spare {
+        return ideal;
+    }
+    let each = (spare / names.len()).saturating_sub(1).max(MIN);
+    vec![each; names.len()]
+}
+
 fn draw_sweep(f: &mut Frame, area: Rect, app: &App) {
     let bt = &app.backtest;
     if bt.sweep.is_empty() {
@@ -579,15 +607,20 @@ fn draw_sweep(f: &mut Frame, area: Rect, app: &App) {
         .map(|s| s.params.keys().cloned().collect())
         .unwrap_or_default();
 
+    // Parameter columns are sized to their own names where the panel allows
+    // it. They used to be a flat nine columns, which turned every name longer
+    // than that into "overboug…" — a header that names nothing is worse than a
+    // narrower number beside it.
+    let widths = param_widths(&names, area.width as usize);
+
     let mut header = format!("{:>8} ", "score");
-    for n in &names {
-        header.push_str(&format!("{:>9} ", theme::truncate(n, 9)));
+    for (n, w) in names.iter().zip(&widths) {
+        header.push_str(&format!("{:>1$} ", theme::truncate(n, *w), w));
     }
     header.push_str(&format!(
         "{:>9} {:>7} {:>8} {:>7}",
         "return", "Sharpe", "maxDD", "trades"
     ));
-
     let mut lines = vec![Line::styled(header, theme::header_style())];
 
     let rows = area.height.saturating_sub(1) as usize;
@@ -600,9 +633,13 @@ fn draw_sweep(f: &mut Frame, area: Rect, app: &App) {
                 theme::muted()
             }),
         )];
-        for n in &names {
+        for (n, w) in names.iter().zip(&widths) {
             spans.push(Span::styled(
-                format!("{:>9} ", fmt_param(p.params.get(n).copied().unwrap_or(0.0))),
+                format!(
+                    "{:>1$} ",
+                    fmt_param(p.params.get(n).copied().unwrap_or(0.0)),
+                    w
+                ),
                 Style::default().fg(theme::fg()),
             ));
         }
@@ -742,7 +779,7 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
         hint(
             f,
             area,
-            "Press u to run this strategy across the market.\n\nOne symbol proves nothing — an edge that only works on the scrip you happened to be looking at is a coincidence. Note that delisted scrips are absent from PSX's symbol list, so these results are biased upward by survivorship.",
+            "Press u for the most liquid 150 symbols, U for every listed symbol (a few seconds, in the background), or c for the symbols on the Compare screen.\n\nOne symbol proves nothing — an edge that only works on the scrip you happened to be looking at is a coincidence. Note that delisted scrips are absent from PSX's symbol list, so these results are biased upward by survivorship.",
         );
         return;
     }
@@ -751,11 +788,23 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
         Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
 
     let s = &bt.scan_summary;
+    let scope = bt.scan_scope;
+    // "8 of 8" reads as complete; "6 of 8" says two symbols had too little
+    // history to run, which is a fact about the basket, not a rendering gap.
+    let coverage = if bt.scan_asked > s.symbols {
+        format!("{} of {}", s.symbols, bt.scan_asked)
+    } else {
+        s.symbols.to_string()
+    };
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
+                Span::styled(
+                    format!("{:<13}", scope.label()),
+                    Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("symbols ", Style::default().fg(theme::muted())),
-                Span::styled(format!("{:<8}", s.symbols), Style::default().fg(theme::fg())),
+                Span::styled(format!("{coverage:<12}"), Style::default().fg(theme::fg())),
                 Span::styled("median ", Style::default().fg(theme::muted())),
                 Span::styled(
                     format!("{:<10}", theme::pct(s.median_return_pct)),
@@ -773,7 +822,14 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
                 ),
             ]),
             Line::styled(
-                "Survivorship: delisted scrips are not in PSX's symbol list, so this is biased upward.",
+                match scope {
+                    ScanScope::Market | ScanScope::All => {
+                        "Survivorship: delisted scrips are not in PSX's symbol list, so this is biased upward."
+                    }
+                    ScanScope::Compare => {
+                        "These symbols were hand-picked, so this measures the strategy on your selection, not the market."
+                    }
+                },
                 Style::default().fg(theme::warn()),
             ),
         ]),
@@ -790,27 +846,49 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
 
     let rows = rows_area.height.saturating_sub(1) as usize;
     for row in bt.scan.iter().skip(bt.scan_offset).take(rows) {
+        // A kept row with no trades means the rule never fired on that scrip.
+        // Its "return" is zero only because nothing happened, so the strategy
+        // columns are dashed rather than printed as a result — buy-and-hold
+        // still is one, and is what the row is there to be read against.
+        let silent = row.trade_count == 0;
+        let dash = |width: usize| format!("{:>width$} ", "—");
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<12} ", theme::truncate(&row.symbol, 12)),
                 Style::default()
-                    .fg(theme::fg())
+                    .fg(if silent { theme::muted() } else { theme::fg() })
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:>10} ", theme::pct(row.total_return_pct)),
-                Style::default().fg(theme::change_color(row.total_return_pct)),
+                if silent {
+                    dash(10)
+                } else {
+                    format!("{:>10} ", theme::pct(row.total_return_pct))
+                },
+                Style::default().fg(if silent {
+                    theme::dim()
+                } else {
+                    theme::change_color(row.total_return_pct)
+                }),
             ),
             Span::styled(
                 format!("{:>10} ", theme::pct(row.buy_hold_return_pct)),
                 Style::default().fg(theme::dim()),
             ),
             Span::styled(
-                format!("{:>8} ", format!("{:.2}", row.sharpe)),
+                if silent {
+                    dash(8)
+                } else {
+                    format!("{:>8} ", format!("{:.2}", row.sharpe))
+                },
                 Style::default().fg(theme::fg()),
             ),
             Span::styled(
-                format!("{:>9} ", theme::pct_plain(row.max_drawdown_pct)),
+                if silent {
+                    dash(9)
+                } else {
+                    format!("{:>9} ", theme::pct_plain(row.max_drawdown_pct))
+                },
                 Style::default().fg(theme::down()),
             ),
             Span::styled(
@@ -818,7 +896,11 @@ fn draw_scan(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(theme::muted()),
             ),
             Span::styled(
-                format!("{:>6.0}", row.win_rate_pct),
+                if silent {
+                    "     —".to_string()
+                } else {
+                    format!("{:>6.0}", row.win_rate_pct)
+                },
                 Style::default().fg(theme::muted()),
             ),
         ]));
@@ -856,6 +938,31 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every column in the sweep table must be identifiable. Parameter names
+    /// were fixed at nine columns, which rendered `overbought` as "overboug…"
+    /// — a header that names nothing.
+    #[test]
+    fn the_sweep_header_spells_out_every_column() {
+        let names: Vec<String> = ["overbought", "oversold", "rsi_period", "trend"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // A normal results panel: wide enough for the names in full.
+        let widths = param_widths(&names, 130);
+        assert_eq!(widths, vec![10, 8, 10, 5], "sized to the names");
+
+        // Cramped: shared equally rather than letting one name eat the table.
+        let narrow = param_widths(&names, 60);
+        assert!(narrow.iter().all(|w| *w >= 4), "never pure punctuation");
+        assert!(
+            narrow.iter().all(|w| *w <= widths[0]),
+            "and never wider than it would ideally be: {narrow:?}"
+        );
+
+        assert!(param_widths(&[], 130).is_empty());
+    }
 
     #[test]
     fn wrapping_breaks_on_word_boundaries() {
@@ -950,6 +1057,7 @@ mod tests {
             &params,
             &["AAA".to_string(), "BBB".to_string()],
             &config,
+            crate::backtest::optimize::Silent::Drop,
             |_| Some(bars(600)),
         );
         full.backtest.scan_summary = crate::backtest::optimize::summarize(&full.backtest.scan);

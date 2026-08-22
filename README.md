@@ -249,7 +249,8 @@ Press `?` in the app for the full list.
 | `T` | Cycle colour theme (remembered between sessions) |
 | `M` | Mouse on/off (off restores terminal text selection) |
 | `f` / `←` `→` | Backtest: focus strategies or parameters / tweak the selected one (tweaking moves focus to the parameters, so `↓` reaches the next one) |
-| `Enter` / `s` / `W` / `u` | Backtest: run · sweep parameters · walk forward · scan the market |
+| `Enter` / `s` / `W` | Backtest: run · sweep parameters · walk forward |
+| `u` / `U` / `c` | Backtest: scan the liquid 150 · every listed symbol · the Compare set |
 
 ### Mouse
 
@@ -356,8 +357,27 @@ Optional top-level keys: `direction = "short"`, `stop_loss_pct`,
 `take_profit_pct`, `min_hold_bars`, and a `filter` rule that gates entries.
 
 **Views** (`v` cycles): equity curve against buy-and-hold, the trade list,
-the parameter sweep, walk-forward folds, and a scan of the strategy across the
-market's most liquid 150 symbols.
+the parameter sweep, walk-forward folds, and a scan table.
+
+The scan runs the same table over three different universes. `u` takes the
+market's most liquid 150 — *does this rule work anywhere* — and answers
+instantly. `U` takes **every listed symbol**, thin scrips included; that is
+seconds of arithmetic rather than milliseconds, so it runs on the background
+worker and the table appears when it lands. `c` takes exactly the symbols on the
+Compare screen — *how would it have done on the scrips I am actually looking
+at*.
+
+Each labels which universe it ran, because the biases differ: a market scan is
+flattered by survivorship, while a hand-picked basket measures the strategy
+against your own selection. A basket keeps every symbol you named, including one
+the rule never fired on — that row shows `—` with a trade count of zero rather
+than being dropped, because you asked about it.
+
+**Changing the symbol.** The backtest runs on the selected scrip. Press `/` and
+search from the Backtest screen and you stay on it, now pointed at the new
+symbol; `Enter` on any Screener or Dashboard row selects one too. A result
+already on screen stays there until you run again, titled with the symbol it
+actually ran on rather than the one now selected.
 
 ### True intraday range
 

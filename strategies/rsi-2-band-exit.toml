@@ -1,0 +1,23 @@
+name = "Connors RSI(2) Band Exit"
+about = "The same dip-buy as Connors RSI(2) — only above the 200-day average, entering when the 2-period RSI collapses under 10 — but held until RSI recovers to the 90 band instead of until price crosses the 5-day average. Waiting for the band is a slower exit: it holds through the first bounce, so trades are fewer and longer, and a rally that stalls below 90 is given back rather than banked. Set oversold to 5 and overbought to 95 for the extreme-reading variant."
+source = "Larry Connors & Cesar Alvarez, 'Short Term Trading Strategies That Work' for the entry and trend filter; the symmetric band exit is the common charting-platform rendering of it (RSI length 2, bands at 10/90), not the book's own exit rule."
+direction = "long"
+
+[params]
+rsi_period = { default = 2, min = 2, max = 5, step = 1, about = "RSI lookback — Connors uses 2" }
+oversold = { default = 10, min = 2, max = 30, step = 1, about = "Entry band; 5 is the extreme-reading variant" }
+overbought = { default = 90, min = 60, max = 98, step = 1, about = "Exit band; 95 pairs with an oversold of 5" }
+trend = { default = 200, min = 50, max = 250, step = 10, about = "Trend filter average" }
+
+[indicators]
+r = "rsi(close, rsi_period)"
+trend_ma = "sma(close, trend)"
+
+[rules]
+# Same as the sibling strategy, and for the same reason: this is a dip-buying
+# rule, and buying dips in a downtrend is catching a falling knife.
+filter = "close > trend_ma"
+entry = "r < oversold"
+# The one real difference. A 2-period RSI reaches 90 only after a genuine
+# thrust, so this holds where the 5-day-average exit would already be flat.
+exit = "r > overbought"

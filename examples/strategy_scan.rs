@@ -24,9 +24,14 @@ fn main() -> Result<()> {
     let config = Config::default();
 
     let symbols: Vec<String> = store.symbols()?.into_iter().map(|s| s.symbol).collect();
-    let rows = optimize::scan(&s, &params, &symbols, &config, |sym| {
-        store.bars(sym, None).ok()
-    });
+    let rows = optimize::scan(
+        &s,
+        &params,
+        &symbols,
+        &config,
+        optimize::Silent::Drop,
+        |sym| store.bars(sym, None).ok(),
+    );
     let summary = optimize::summarize(&rows);
 
     let traded: Vec<_> = rows.iter().filter(|r| r.trade_count > 0).collect();

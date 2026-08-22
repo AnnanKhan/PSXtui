@@ -60,6 +60,34 @@ impl View {
     }
 }
 
+/// Which universe the last scan ran over.
+///
+/// The same table answers two different questions, and the difference matters
+/// enough to be on screen: "does this rule work anywhere" is a market-wide
+/// result with survivorship bias baked in, while "how would it have done on the
+/// eight scrips I am comparing" is a hand-picked basket and biased by whatever
+/// made the user pick them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScanScope {
+    /// The most liquid symbols on the board, up to [`SCAN_LIMIT`].
+    #[default]
+    Market,
+    /// Every symbol on the board, however thin.
+    All,
+    /// Exactly the symbols on the Compare screen.
+    Compare,
+}
+
+impl ScanScope {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ScanScope::Market => "Market 150",
+            ScanScope::All => "All symbols",
+            ScanScope::Compare => "Compare set",
+        }
+    }
+}
+
 /// How many symbols a universe scan covers before it stops.
 ///
 /// A scan is O(symbols x bars) and the cache holds ~1,100 symbols against five
@@ -100,6 +128,12 @@ pub struct BacktestState {
     pub walk_forward: Option<WalkForward>,
     pub scan: Vec<ScanRow>,
     pub scan_summary: ScanSummary,
+    /// What the rows in `scan` were run over.
+    pub scan_scope: ScanScope,
+    /// How many symbols were asked for, which is not how many produced a row —
+    /// a scrip with too little history to warm an indicator up cannot be run
+    /// at all, and the difference is worth reporting rather than hiding.
+    pub scan_asked: usize,
 
     /// Row offsets for the scrollable result views.
     pub trades_offset: usize,
@@ -149,6 +183,7 @@ impl BacktestState {
         self.walk_forward = None;
         self.scan.clear();
         self.scan_summary = ScanSummary::default();
+        self.scan_asked = 0;
         self.trades_offset = 0;
         self.sweep_offset = 0;
         self.scan_offset = 0;

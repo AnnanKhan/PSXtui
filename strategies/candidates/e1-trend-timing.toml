@@ -1,0 +1,10 @@
+name = "Trend Timing"
+about = "Hold the scrip while it is above its long average and stand aside while it is below. Almost always invested, so it is judged on whether stepping aside in downtrends beats sitting through them."
+source = "Faber's moving-average timing rule, the canonical long-only market-timing test."
+[params]
+trend = { default = 200, min = 100, max = 250, step = 50 }
+[indicators]
+t = "sma(close, trend)"
+[rules]
+entry = "close > t"
+exit = "close < t"

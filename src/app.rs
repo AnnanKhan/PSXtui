@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Datelike, FixedOffset, NaiveTime, Utc, Weekday};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -26,6 +27,57 @@ use backtest_state::{BacktestState, Focus as BtFocus, ScanScope, View as BtView}
 
 /// The benchmark every risk statistic is measured against.
 pub const BENCHMARK: &str = "KSE100";
+
+/// The regular equity market state at a point in Pakistan Standard Time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketState {
+    Open,
+    Closed,
+}
+
+impl MarketState {
+    pub const fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Open => "OPEN",
+            Self::Closed => "CLOSED",
+        }
+    }
+}
+
+/// Regular PSX equity-market hours, evaluated in PKT.
+///
+/// Monday to Thursday have one session. Friday has a midday prayer break.
+/// Pre-open, post-close and negotiated-deals hours deliberately remain closed
+/// here: this indicator answers whether the regular market is trading.
+pub fn market_state_at(weekday: Weekday, time: NaiveTime) -> MarketState {
+    let in_session = |open: (u32, u32), close: (u32, u32)| {
+        let open = NaiveTime::from_hms_opt(open.0, open.1, 0).expect("valid market open");
+        let close = NaiveTime::from_hms_opt(close.0, close.1, 0).expect("valid market close");
+        time >= open && time < close
+    };
+
+    let open = match weekday {
+        Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu => in_session((9, 32), (15, 30)),
+        Weekday::Fri => in_session((9, 17), (12, 0)) || in_session((14, 32), (16, 30)),
+        Weekday::Sat | Weekday::Sun => false,
+    };
+
+    if open {
+        MarketState::Open
+    } else {
+        MarketState::Closed
+    }
+}
+
+/// Current regular PSX equity-market state.
+pub fn market_state() -> MarketState {
+    let now: DateTime<FixedOffset> = Utc::now().with_timezone(&crate::cache::pkt());
+    market_state_at(now.weekday(), now.time())
+}
 
 /// How long a symbol's live data stays fresh before revisiting the network.
 ///
@@ -962,6 +1014,11 @@ impl App {
     /// Whether anything is loading right now.
     pub fn is_busy(&self) -> bool {
         !self.activities.is_empty() || self.backfill.is_some()
+    }
+
+    /// Current regular PSX equity-market state for the status bar.
+    pub fn market_state(&self) -> MarketState {
+        market_state()
     }
 
     /// The current spinner glyph.
@@ -3900,6 +3957,58 @@ exit = "close < fast"
         a.spinner = usize::MAX;
         a.tick();
         assert!(a.spinner_glyph().is_alphanumeric() || !a.spinner_glyph().is_control());
+    }
+
+    #[test]
+    fn market_state_matches_the_regular_psx_sessions() {
+        let time = |h, m| chrono::NaiveTime::from_hms_opt(h, m, 0).unwrap();
+
+        assert_eq!(
+            market_state_at(chrono::Weekday::Mon, time(9, 31)),
+            MarketState::Closed
+        );
+        assert_eq!(
+            market_state_at(chrono::Weekday::Mon, time(9, 32)),
+            MarketState::Open
+        );
+        assert_eq!(
+            market_state_at(chrono::Weekday::Thu, time(15, 29)),
+            MarketState::Open
+        );
+        assert_eq!(
+            market_state_at(chrono::Weekday::Thu, time(15, 30)),
+            MarketState::Closed
+        );
+
+        assert_eq!(
+            market_state_at(chrono::Weekday::Fri, time(9, 17)),
+            MarketState::Open
+        );
+        assert_eq!(
+            market_state_at(chrono::Weekday::Fri, time(12, 0)),
+            MarketState::Closed
+        );
+        assert_eq!(
+            market_state_at(chrono::Weekday::Fri, time(14, 31)),
+            MarketState::Closed
+        );
+        assert_eq!(
+            market_state_at(chrono::Weekday::Fri, time(14, 32)),
+            MarketState::Open
+        );
+        assert_eq!(
+            market_state_at(chrono::Weekday::Fri, time(16, 30)),
+            MarketState::Closed
+        );
+
+        assert_eq!(
+            market_state_at(chrono::Weekday::Sat, time(11, 0)),
+            MarketState::Closed
+        );
+        assert_eq!(
+            market_state_at(chrono::Weekday::Sun, time(11, 0)),
+            MarketState::Closed
+        );
     }
 
     /// A market with more symbols than any board can display.

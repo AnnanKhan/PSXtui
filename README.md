@@ -23,6 +23,13 @@ return analytics, company fundamentals, and intraday microstructure.
 
 Timeframes: 5D, 1M, 3M, 6M, YTD, 1Y, 2Y, 3Y, 5Y and MAX.
 
+The bottom-right status bar shows the regular PSX equity session: a green
+`● OPEN` during trading and a red `● CLOSED` outside it. It follows the
+[official PSX schedule](https://www.psx.com.pk/psx/exchange/general/trading-hours)
+in Pakistan Standard Time, including Friday's midday break. Exchange holidays
+are not inferred from the clock, so the indicator is a session-hours signal
+rather than a live holiday calendar.
+
 <table>
 <tr><td width="50%"><a href="docs/chart.png"><img src="docs/chart.png" alt="Chart"></a><br><b>Chart</b> — candles, SMA/EMA overlays, volume pane</td>
 <td width="50%"><a href="docs/compare-full.png"><img src="docs/compare-full.png" alt="Compare"></a><br><b>Compare</b> — up to eight scrips rebased, with risk and correlations</td></tr>
@@ -340,12 +347,19 @@ each walk-forward window. One declaration, three uses.
 
 **Expressions.** Columns `close`, `open`, `high`, `low`, `volume`, `typical`;
 operators `+ - * /`, `> >= < <= == !=`, `and`/`or`/`not`; and the functions
-`sma ema rsi atr obv cci williams_r macd macd_signal macd_hist bb_upper bb_mid
-bb_lower stoch_k stoch_d adx di_plus di_minus donchian_upper donchian_lower
-donchian_mid highest lowest change pct_change prev cross_above cross_below abs
-min max hammer bullish_engulfing morning_star`. Everything is a whole aligned
-column, so an indicator's warm-up is `None` and a rule built on it is undefined
-rather than accidentally true.
+`sma(src, n) ema(src, n) rsi(src, n) atr(n) obv() cci(n) williams_r(n)
+macd(src, fast, slow, signal) macd_signal(…) macd_hist(…) bb_upper(src, n, sd)
+bb_mid(…) bb_lower(…) stoch_k(n, d) stoch_d(n, d) adx(n) di_plus(n) di_minus(n)
+donchian_upper(n) donchian_lower(n) donchian_mid(n) highest(src, n)
+lowest(src, n) change(src, n) pct_change(src, n) prev(src, n)
+cross_above(a, b) cross_below(a, b) abs(x) min(a, b) max(a, b) hammer()
+bullish_engulfing() morning_star()`. Everything is a whole aligned column, so an
+indicator's warm-up is `None` and a rule built on it is undefined rather than
+accidentally true.
+
+Argument counts are checked when the file loads, not when it runs: `prev(close)`
+is one short, and a strategy that loads and then never fires is the worst
+failure a backtester has — it looks like an answer.
 
 The three candlestick patterns take no arguments — `hammer()` — and return `1`
 on the bar completing the pattern. They read intraday extremes, so see
@@ -378,6 +392,53 @@ search from the Backtest screen and you stay on it, now pointed at the new
 symbol; `Enter` on any Screener or Dashboard row selects one too. A result
 already on screen stays there until you run again, titled with the symbol it
 actually ran on rather than the one now selected.
+
+### Searching for a strategy
+
+`examples/strategy_lab.rs` is the search harness. It exists because a
+backtester makes it trivially easy to find a rule that would have worked, and
+almost as easy to believe it. The protocol is fixed in the code rather than
+left to whoever is running it:
+
+```sh
+cargo run --release --example strategy_lab -- fit  strategies/candidates
+cargo run --release --example strategy_lab -- test strategies/candidates/x.toml
+```
+
+1. **A clean universe.** Cached symbols with 900+ sessions and a median daily
+   turnover above PKR 3M, excluding any series with a close that moved more
+   than 40% between two sessions — impossible under PSX's ±10% breaker, so it
+   is an unadjusted corporate action and every return across it is fiction.
+   That exclusion currently removes 20 of ~150 otherwise-liquid names.
+2. **A chronological split.** Oldest 70% to fit on, newest 30% held back.
+   `fit` cannot see the holdout at all.
+3. **Pooled parameters.** One parameter set for the whole universe. Fitting
+   each scrip its own numbers produces a beautiful table and no evidence.
+4. **A cross-sectional verdict.** What share of the universe the rule beat
+   *holding that same scrip* — not what the best chart did.
+5. **A run-up before measurement, on both sides.** A 250-day filter says
+   nothing for 250 days. Measure buy-and-hold across that stretch and the
+   benchmark is credited with a rally the rule could not have traded; on this
+   data that mistake alone was worth 78 points.
+6. **Accept criteria set in advance**: beat 55% of the universe out of sample,
+   at least 5 trades per symbol, drawdown no worse than holding, and the edge
+   must not change sign between windows.
+
+Sixteen candidates across six families have been through it — mean reversion
+(RSI(2) variants, stochastic, ADX-gated), breakout (Donchian, Bollinger
+squeeze, volume-confirmed), pullback, MACD, dual-momentum and moving-average
+timing. **None has passed.** The two most instructive results:
+
+* A Donchian breakout scored 67% on the training window and 12% on the
+  holdout. Its own control — the same breakout without the trend filter —
+  scored 50%, which says the filter was doing the work, not the breakout.
+* Moving-average timing scored 78% when measured from the start of the
+  training window and 33% when measured from a point 250 sessions later. The
+  difference is not the rule; it is whether the window happens to open at a
+  market top.
+
+That is the harness working. A search that produces a winner every time is
+measuring the searcher.
 
 ### True intraday range
 

@@ -462,42 +462,60 @@ fn binary(op: BinOp, a: &Series, b: &Series) -> Series {
 /// Kept deliberately small and total: every one of these maps onto something
 /// already in `analysis::indicators`, so a strategy cannot reach a code path
 /// the rest of the app does not already exercise.
-pub const FUNCTIONS: &[&str] = &[
-    "sma",
-    "ema",
-    "rsi",
-    "atr",
-    "obv",
-    "cci",
-    "williams_r",
-    "macd",
-    "macd_signal",
-    "macd_hist",
-    "bb_upper",
-    "bb_mid",
-    "bb_lower",
-    "stoch_k",
-    "stoch_d",
-    "adx",
-    "di_plus",
-    "di_minus",
-    "donchian_upper",
-    "donchian_lower",
-    "donchian_mid",
-    "highest",
-    "lowest",
-    "change",
-    "pct_change",
-    "prev",
-    "cross_above",
-    "cross_below",
-    "abs",
-    "min",
-    "max",
-    "hammer",
-    "bullish_engulfing",
-    "morning_star",
+/// Every function an expression may call, with how many arguments it takes.
+///
+/// Arity lives here rather than only inside [`call`] so a strategy file can be
+/// rejected when it is loaded. It used to be checked at evaluation time, where
+/// the sweep and the scan swallow errors by design — so `prev(close)`, which is
+/// one argument short, loaded happily and then quietly never fired. A rule that
+/// silently never fires is the worst failure a backtester has: it looks like an
+/// answer.
+pub const SIGNATURES: &[(&str, usize)] = &[
+    ("sma", 2),
+    ("ema", 2),
+    ("rsi", 2),
+    ("atr", 1),
+    ("obv", 0),
+    ("cci", 1),
+    ("williams_r", 1),
+    ("macd", 4),
+    ("macd_signal", 4),
+    ("macd_hist", 4),
+    ("bb_upper", 3),
+    ("bb_mid", 3),
+    ("bb_lower", 3),
+    ("stoch_k", 2),
+    ("stoch_d", 2),
+    ("adx", 1),
+    ("di_plus", 1),
+    ("di_minus", 1),
+    ("donchian_upper", 1),
+    ("donchian_lower", 1),
+    ("donchian_mid", 1),
+    ("highest", 2),
+    ("lowest", 2),
+    ("change", 2),
+    ("pct_change", 2),
+    ("prev", 2),
+    ("cross_above", 2),
+    ("cross_below", 2),
+    ("abs", 1),
+    ("min", 2),
+    ("max", 2),
+    ("hammer", 0),
+    ("bullish_engulfing", 0),
+    ("morning_star", 0),
 ];
+
+/// The callable names, for error messages that list what is available.
+pub fn function_names() -> Vec<&'static str> {
+    SIGNATURES.iter().map(|(f, _)| *f).collect()
+}
+
+/// How many arguments `name` takes, or `None` if there is no such function.
+pub fn arity_of(name: &str) -> Option<usize> {
+    SIGNATURES.iter().find(|(f, _)| *f == name).map(|(_, n)| *n)
+}
 
 fn call(name: &str, args: &[Expr], ctx: &Context) -> Result<Series, ExprError> {
     let n = ctx.len();
@@ -752,6 +770,23 @@ pub fn referenced_names(expr: &Expr, out: &mut Vec<String>) {
 }
 
 /// Every function an expression calls, for the same reason.
+/// Every call in an expression, as (name, argument count), for validating a
+/// strategy before it is ever run against bars.
+pub fn calls(expr: &Expr, out: &mut Vec<(String, usize)>) {
+    match expr {
+        Expr::Num(_) | Expr::Ident(_) => {}
+        Expr::Unary(_, e) => calls(e, out),
+        Expr::Binary(_, l, r) => {
+            calls(l, out);
+            calls(r, out);
+        }
+        Expr::Call(name, args) => {
+            out.push((name.clone(), args.len()));
+            args.iter().for_each(|a| calls(a, out));
+        }
+    }
+}
+
 pub fn called_functions(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::Num(_) | Expr::Ident(_) => {}
@@ -959,8 +994,8 @@ mod tests {
             .collect();
         let b = bars(&closes);
         let ctx = Context::new(&b);
-        for f in FUNCTIONS {
-            let src = match *f {
+        for f in function_names() {
+            let src = match f {
                 "obv" | "hammer" | "bullish_engulfing" | "morning_star" => format!("{f}()"),
                 "macd" | "macd_signal" | "macd_hist" => format!("{f}(close, 12, 26, 9)"),
                 "bb_upper" | "bb_mid" | "bb_lower" => format!("{f}(close, 20, 2)"),
@@ -974,6 +1009,17 @@ mod tests {
             let e = parse(&src).unwrap_or_else(|e| panic!("{f}: parse failed: {e}"));
             let out = eval(&e, &ctx).unwrap_or_else(|e| panic!("{f}: eval failed: {e}"));
             assert_eq!(out.len(), b.len(), "{f} returned a misaligned column");
+
+            // And the declared arity must be the one `call` accepts, or a file
+            // is rejected for the wrong reason — or, worse, accepted.
+            let mut found = Vec::new();
+            calls(&e, &mut found);
+            let (_, argc) = found.first().expect("the source is a call");
+            assert_eq!(
+                arity_of(f),
+                Some(*argc),
+                "{f}: SIGNATURES disagrees with what `call` accepts"
+            );
         }
     }
 

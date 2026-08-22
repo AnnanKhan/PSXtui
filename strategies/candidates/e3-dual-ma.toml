@@ -1,0 +1,12 @@
+name = "Dual MA Hold"
+about = "Invested while the fast average leads the slow one — a slower switch than price alone, so fewer round trips."
+source = "The moving-average crossover, held rather than traded."
+[params]
+fast = { default = 50, min = 20, max = 50, step = 15 }
+slow = { default = 200, min = 150, max = 200, step = 50 }
+[indicators]
+f = "sma(close, fast)"
+s = "sma(close, slow)"
+[rules]
+entry = "f > s"
+exit = "f < s"

@@ -1,0 +1,11 @@
+name = "Trend Timing Band"
+about = "The same timing rule with a band around the average, so a scrip hovering at its trend line is not traded on every wobble."
+source = "Faber's rule with the standard whipsaw band."
+[params]
+trend = { default = 200, min = 150, max = 250, step = 50 }
+band = { default = 3, min = 0, max = 6, step = 3 }
+[indicators]
+t = "sma(close, trend)"
+[rules]
+entry = "close > t * (100 + band) / 100"
+exit = "close < t * (100 - band) / 100"

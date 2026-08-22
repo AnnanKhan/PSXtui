@@ -1,0 +1,12 @@
+name = "Trend Timing + Momentum"
+about = "Invested only while price is above its long average *and* the year's return is positive, which is the pair most timing studies find adds anything to either alone."
+source = "Faber's timing rule combined with absolute momentum (Antonacci)."
+[params]
+trend = { default = 200, min = 150, max = 250, step = 50 }
+mom_lb = { default = 250, min = 120, max = 250, step = 65 }
+[indicators]
+t = "sma(close, trend)"
+m = "pct_change(close, mom_lb)"
+[rules]
+entry = "close > t and m > 0"
+exit = "close < t"

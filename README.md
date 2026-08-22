@@ -1,4 +1,4 @@
-# psxtui
+# PSXTUI
 
 A terminal client for **Pakistan Stock Exchange** market data — live quotes, a
 full-market screener, candlestick charts with technical indicators, risk and

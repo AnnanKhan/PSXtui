@@ -23,6 +23,13 @@ return analytics, company fundamentals, and intraday microstructure.
 
 Timeframes: 5D, 1M, 3M, 6M, YTD, 1Y, 2Y, 3Y, 5Y and MAX.
 
+The bottom-right status bar shows the regular PSX equity session: a green
+`● OPEN` during trading and a red `● CLOSED` outside it. It follows the
+[official PSX schedule](https://www.psx.com.pk/psx/exchange/general/trading-hours)
+in Pakistan Standard Time, including Friday's midday break. Exchange holidays
+are not inferred from the clock, so the indicator is a session-hours signal
+rather than a live holiday calendar.
+
 <table>
 <tr><td width="50%"><a href="docs/chart.png"><img src="docs/chart.png" alt="Chart"></a><br><b>Chart</b> — candles, SMA/EMA overlays, volume pane</td>
 <td width="50%"><a href="docs/compare-full.png"><img src="docs/compare-full.png" alt="Compare"></a><br><b>Compare</b> — up to eight scrips rebased, with risk and correlations</td></tr>

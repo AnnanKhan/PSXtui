@@ -149,6 +149,10 @@ async fn run(
     // Drives the busy spinner. Ticks continuously but only forces a redraw
     // while work is in flight, so an idle app costs nothing.
     let mut spinner = tokio::time::interval(SPINNER_TICK);
+    // The status bar owns the market indicator. Keep polling on the existing
+    // spinner cadence so it changes at the session boundary even when the app
+    // is otherwise idle, without adding another timer or network request.
+    let mut last_market_state = app.market_state();
 
     render(&mut terminal, app)?;
 
@@ -184,11 +188,15 @@ async fn run(
             }
             _ = spinner.tick() => {
                 // Fire any fetch whose cursor has settled, then advance the
-                // spinner. Skip the redraw entirely when nothing is happening.
+                // spinner. An idle redraw is also needed when the regular
+                // market crosses an open, break, close, or weekend boundary.
                 let fired = app.poll_pending_load();
-                if !fired && !app.is_busy() {
+                let market_state = app.market_state();
+                let market_changed = market_state != last_market_state;
+                if !fired && !app.is_busy() && !market_changed {
                     continue;
                 }
+                last_market_state = market_state;
                 app.tick();
             }
         }

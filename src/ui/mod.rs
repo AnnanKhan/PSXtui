@@ -116,7 +116,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
     let labels: Vec<String> = Screen::ALL
         .iter()
         .enumerate()
-        .map(|(i, s)| format!("{} {}", i + 1, s.title()))
+        .map(|(i, s)| format!("{} {}", screen_key(i), s.title()))
         .collect();
 
     let titles: Vec<Line> = Screen::ALL
@@ -124,7 +124,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, s)| {
             Line::from(vec![
-                Span::styled(format!("{} ", i + 1), Style::new().fg(theme::dim())),
+                Span::styled(format!("{} ", screen_key(i)), Style::new().fg(theme::dim())),
                 Span::raw(s.title()),
             ])
         })
@@ -162,6 +162,16 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// Number-key label for a screen. Digits 1-9 address the first nine screens;
+/// `0` is the conventional tenth-screen shortcut.
+fn screen_key(index: usize) -> String {
+    if index == 9 {
+        "0".into()
+    } else {
+        (index + 1).to_string()
+    }
+}
+
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let mut spans = Vec::new();
 
@@ -174,82 +184,92 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
             "   Enter to open · Esc to cancel",
             theme::label_style(),
         ));
-        f.render_widget(Paragraph::new(Line::from(spans)), area);
-        return;
-    }
-
-    if !app.selected.is_empty() {
-        spans.push(Span::styled(
-            format!(" {} ", app.selected),
-            Style::new().fg(theme::accent()).bold(),
-        ));
-        if app.watchlist.contains(&app.selected) {
-            spans.push(Span::styled("★ ", Style::new().fg(theme::warn())));
-        }
-        if let Some(q) = app.selected_quote() {
-            spans.push(Span::styled(theme::price(q.current), theme::value_style()));
-            spans.push(Span::styled(
-                format!(" {} ", theme::pct(q.change_pct)),
-                Style::new().fg(theme::change_color(q.change_pct)),
-            ));
-        }
-        spans.push(Span::styled("│ ", theme::border_style()));
-    }
-
-    // Errors outrank status; they persist until Esc.
-    if let Some(err) = &app.error {
-        spans.push(Span::styled(
-            format!("⚠ {} ", theme::truncate(err, 60)),
-            Style::new().fg(theme::down()),
-        ));
-        spans.push(Span::styled("(Esc) ", theme::label_style()));
     } else {
-        spans.push(Span::styled(app.status.clone(), theme::label_style()));
-    }
-
-    // Name the work in flight rather than showing an anonymous busy dot: when
-    // a load is slow, "what is it waiting on" is the only useful information.
-    if !app.activities.is_empty() {
-        spans.push(Span::styled(
-            format!("  {} ", app.spinner_glyph()),
-            Style::new().fg(theme::warn()),
-        ));
-        spans.push(Span::styled(
-            app.activities.join(" · "),
-            Style::new().fg(theme::warn()),
-        ));
-    }
-
-    if let Some(b) = &app.backfill {
-        spans.push(Span::styled(" │ ", theme::border_style()));
-        spans.push(Span::styled("backfill ", theme::label_style()));
-        spans.push(Span::styled(
-            widgets::bar(b.ratio(), 12),
-            Style::new().fg(theme::accent()),
-        ));
-        spans.push(Span::styled(
-            format!(" {}/{} {}", b.done, b.total, b.day),
-            theme::label_style(),
-        ));
-        if let Some(rows) = b.rows {
+        if !app.selected.is_empty() {
             spans.push(Span::styled(
-                format!(" ({rows} symbols)"),
-                Style::new().fg(theme::dim()),
+                format!(" {} ", app.selected),
+                Style::new().fg(theme::accent()).bold(),
             ));
+            if app.watchlist.contains(&app.selected) {
+                spans.push(Span::styled("★ ", Style::new().fg(theme::warn())));
+            }
+            if let Some(q) = app.selected_quote() {
+                spans.push(Span::styled(theme::price(q.current), theme::value_style()));
+                spans.push(Span::styled(
+                    format!(" {} ", theme::pct(q.change_pct)),
+                    Style::new().fg(theme::change_color(q.change_pct)),
+                ));
+            }
+            spans.push(Span::styled("│ ", theme::border_style()));
+        }
+
+        // Errors outrank status; they persist until Esc.
+        if let Some(err) = &app.error {
+            spans.push(Span::styled(
+                format!("⚠ {} ", theme::truncate(err, 60)),
+                Style::new().fg(theme::down()),
+            ));
+            spans.push(Span::styled("(Esc) ", theme::label_style()));
+        } else {
+            spans.push(Span::styled(app.status.clone(), theme::label_style()));
+        }
+
+        // Name the work in flight rather than showing an anonymous busy dot: when
+        // a load is slow, "what is it waiting on" is the only useful information.
+        if !app.activities.is_empty() {
+            spans.push(Span::styled(
+                format!("  {} ", app.spinner_glyph()),
+                Style::new().fg(theme::warn()),
+            ));
+            spans.push(Span::styled(
+                app.activities.join(" · "),
+                Style::new().fg(theme::warn()),
+            ));
+        }
+
+        if let Some(b) = &app.backfill {
+            spans.push(Span::styled(" │ ", theme::border_style()));
+            spans.push(Span::styled("backfill ", theme::label_style()));
+            spans.push(Span::styled(
+                widgets::bar(b.ratio(), 12),
+                Style::new().fg(theme::accent()),
+            ));
+            spans.push(Span::styled(
+                format!(" {}/{} {}", b.done, b.total, b.day),
+                theme::label_style(),
+            ));
+            if let Some(rows) = b.rows {
+                spans.push(Span::styled(
+                    format!(" ({rows} symbols)"),
+                    Style::new().fg(theme::dim()),
+                ));
+            }
         }
     }
 
     let left = Paragraph::new(Line::from(spans));
     const HINT: &str = "? help  q quit ";
-    let right = Paragraph::new(Line::from(vec![Span::styled(HINT, theme::label_style())]))
-        .alignment(Alignment::Right);
+    let market = app.market_state();
+    let market_text = format!("● {}  ", market.label());
+    let market_style = Style::new()
+        .fg(if market.is_open() {
+            theme::up()
+        } else {
+            theme::down()
+        })
+        .bold();
+    let right = Paragraph::new(Line::from(vec![
+        Span::styled(market_text, market_style),
+        Span::styled(HINT, theme::label_style()),
+    ]))
+    .alignment(Alignment::Right);
 
     f.render_widget(left, area);
     f.render_widget(right, area);
 
     // The hint reads as two buttons, so make it behave as two. Right-aligned,
     // so positions are measured back from the right edge.
-    let hint_w = HINT.len() as u16;
+    let hint_w = HINT.chars().count() as u16;
     if area.width > hint_w {
         let start = area.right() - hint_w;
         let mut hits = app.hits.borrow_mut();
@@ -584,6 +604,17 @@ mod tests {
         // A narrower frame drops the tabs that no longer fit.
         render(&app, 20, 10);
         assert_eq!(app.hits.borrow().target_at(150, 1), None);
+    }
+
+    #[test]
+    fn status_bar_shows_the_current_market_state() {
+        let app = app();
+        let buf = render(&app, 160, 24);
+        let status = row_text(&buf, 23);
+        assert!(
+            status.contains(&format!("● {}", crate::app::market_state().label())),
+            "market state missing from status bar: {status:?}"
+        );
     }
 
     #[test]

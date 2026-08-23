@@ -88,7 +88,48 @@ pub fn run(
     params: &HashMap<String, f64>,
     config: &Config,
 ) -> Result<Report> {
-    let signals = strategy.signals(bars, params)?;
+    run_with_benchmark(strategy, bars, None, params, config)
+}
+
+/// Run with a market benchmark available to the strategy as
+/// `benchmark_close`. The plain [`run`] entry point remains source-compatible
+/// for strategies that do not use relative strength.
+pub fn run_with_benchmark(
+    strategy: &Strategy,
+    bars: &[Bar],
+    benchmark: Option<&[Bar]>,
+    params: &HashMap<String, f64>,
+    config: &Config,
+) -> Result<Report> {
+    run_with_benchmark_from(strategy, bars, benchmark, params, config, None)
+}
+
+/// As [`run_with_benchmark`], but bars before `trade_from_ts` are indicator
+/// warm-up only: entries are blocked and the report starts at that timestamp.
+pub fn run_with_benchmark_from(
+    strategy: &Strategy,
+    bars: &[Bar],
+    benchmark: Option<&[Bar]>,
+    params: &HashMap<String, f64>,
+    config: &Config,
+    trade_from_ts: Option<i64>,
+) -> Result<Report> {
+    let signals = strategy.signals_with_benchmark(bars, benchmark, params)?;
+    let report_from = trade_from_ts
+        .and_then(|ts| bars.iter().position(|b| b.ts >= ts))
+        .unwrap_or(0);
+
+    if strategy.entry_size_pct < 100.0 || strategy.add.is_some() || strategy.stop.is_some() {
+        return run_staged(
+            strategy,
+            bars,
+            params,
+            config,
+            signals,
+            trade_from_ts,
+            report_from,
+        );
+    }
 
     let n = bars.len();
     let mut equity: Vec<f64> = Vec::with_capacity(n);
@@ -154,6 +195,7 @@ pub fn run(
                                 0.0
                             },
                             bars_held: i - t.entry_index,
+                            adds: 0,
                             exit_reason: reason,
                         });
                     }
@@ -207,7 +249,8 @@ pub fn run(
         } else {
             let entry = signals.entry[i].is_some_and(|v| v != 0.0);
             let allowed = signals.filter.is_none() || fired(&signals.filter);
-            if entry && allowed {
+            let active = trade_from_ts.is_none_or(|ts| bar.ts >= ts);
+            if entry && allowed && active {
                 pending = Some(Order::Enter);
             }
         }
@@ -233,6 +276,7 @@ pub fn run(
                 if long { raw } else { -raw }
             },
             bars_held: n.saturating_sub(1) - t.entry_index,
+            adds: 0,
             exit_reason: TradeExit::EndOfData,
         });
         if let Some(e) = equity.last_mut() {
@@ -242,12 +286,277 @@ pub fn run(
 
     Ok(Report::build(
         strategy,
-        bars,
-        equity,
+        &bars[report_from..],
+        equity[report_from..].to_vec(),
         trades,
         params.clone(),
         config,
     ))
+}
+
+/// Cash-account simulation for partial entries and add-ons. Existing
+/// all-in strategies stay on the original path above so their historical
+/// results and arithmetic remain byte-for-byte stable.
+fn run_staged(
+    strategy: &Strategy,
+    bars: &[Bar],
+    params: &HashMap<String, f64>,
+    config: &Config,
+    signals: super::strategy::Signals,
+    trade_from_ts: Option<i64>,
+    report_from: usize,
+) -> Result<Report> {
+    let n = bars.len();
+    let mut equity = Vec::with_capacity(n);
+    let mut trades = Vec::new();
+    let mut cash = config.initial_equity;
+    let mut open: Option<LayeredTrade> = None;
+    let mut pending: Option<LayeredOrder> = None;
+    let cost = config.costs.per_side();
+    let long = strategy.direction == Direction::Long;
+
+    for i in 0..n {
+        let bar = &bars[i];
+
+        if let Some(order) = pending.take() {
+            match order {
+                LayeredOrder::Enter => {
+                    let before = cash;
+                    if let Some((qty, notional, fee)) =
+                        allocation(cash, 0.0, bar.open, strategy.entry_size_pct, cost, long)
+                    {
+                        cash += if long {
+                            -notional - fee
+                        } else {
+                            notional - fee
+                        };
+                        open = Some(LayeredTrade {
+                            entry_index: i,
+                            entry_ts: bar.ts,
+                            entry_price: bar.open,
+                            qty,
+                            equity_at_entry: before,
+                            adds: 0,
+                            stop_level: None,
+                        });
+                    }
+                }
+                LayeredOrder::Add => {
+                    if let Some(t) = open.as_mut() {
+                        let marked = cash + t.qty * bar.open;
+                        if let Some((qty, notional, fee)) =
+                            allocation(marked, cash, bar.open, strategy.add_size_pct, cost, long)
+                        {
+                            let old_abs = t.qty.abs();
+                            let add_abs = qty.abs();
+                            t.entry_price = (t.entry_price * old_abs + bar.open * add_abs)
+                                / (old_abs + add_abs);
+                            t.qty += qty;
+                            t.adds += 1;
+                            cash += if long {
+                                -notional - fee
+                            } else {
+                                notional - fee
+                            };
+                        }
+                    }
+                }
+                LayeredOrder::Exit(reason) => {
+                    if let Some(t) = open.take() {
+                        let notional = t.qty.abs() * bar.open;
+                        let fee = notional * cost;
+                        cash += if long {
+                            notional - fee
+                        } else {
+                            -notional - fee
+                        };
+                        let pnl = cash - t.equity_at_entry;
+                        trades.push(layered_trade(&t, bar.ts, bar.open, i, pnl, reason, long));
+                    }
+                }
+            }
+        }
+
+        let marked = open
+            .as_ref()
+            .map(|t| cash + t.qty * bar.close)
+            .unwrap_or(cash);
+        equity.push(marked);
+
+        if i + 1 >= n {
+            continue;
+        }
+
+        let fired = |s: &Option<super::expr::Series>| -> bool {
+            s.as_ref().and_then(|c| c[i]).is_some_and(|v| v != 0.0)
+        };
+        let allowed = signals.filter.is_none() || fired(&signals.filter);
+
+        if let Some(t) = open.as_mut() {
+            if let Some(level) = signals.stop.as_ref().and_then(|s| s[i])
+                && level.is_finite()
+                && level > 0.0
+            {
+                t.stop_level = Some(match t.stop_level {
+                    None => level,
+                    Some(old) if long => old.max(level),
+                    Some(old) => old.min(level),
+                });
+            }
+
+            let held = i - t.entry_index;
+            let mut reason = None;
+            if held >= strategy.min_hold_bars {
+                let move_pct = signed_return_pct_layered(t, bar.close, long);
+                let dynamic_stop = t
+                    .stop_level
+                    .is_some_and(|s| if long { bar.close <= s } else { bar.close >= s });
+                if dynamic_stop {
+                    reason = Some(TradeExit::StopLoss);
+                } else if let Some(sl) = strategy.stop_loss_pct
+                    && move_pct <= -sl
+                {
+                    reason = Some(TradeExit::StopLoss);
+                } else if let Some(tp) = strategy.take_profit_pct
+                    && move_pct >= tp
+                {
+                    reason = Some(TradeExit::TakeProfit);
+                } else if fired(&signals.exit) {
+                    reason = Some(TradeExit::Signal);
+                }
+            }
+
+            if let Some(reason) = reason {
+                pending = Some(LayeredOrder::Exit(reason));
+            } else if t.adds < strategy.max_adds && allowed && fired(&signals.add) {
+                pending = Some(LayeredOrder::Add);
+            }
+        } else if signals.entry[i].is_some_and(|v| v != 0.0)
+            && allowed
+            && trade_from_ts.is_none_or(|ts| bar.ts >= ts)
+        {
+            pending = Some(LayeredOrder::Enter);
+        }
+    }
+
+    if let Some(t) = open.take()
+        && let Some(last) = bars.last()
+    {
+        let notional = t.qty.abs() * last.close;
+        let fee = notional * cost;
+        cash += if long {
+            notional - fee
+        } else {
+            -notional - fee
+        };
+        let pnl = cash - t.equity_at_entry;
+        trades.push(layered_trade(
+            &t,
+            last.ts,
+            last.close,
+            n.saturating_sub(1),
+            pnl,
+            TradeExit::EndOfData,
+            long,
+        ));
+        if let Some(last_equity) = equity.last_mut() {
+            *last_equity = cash;
+        }
+    }
+
+    Ok(Report::build(
+        strategy,
+        &bars[report_from..],
+        equity[report_from..].to_vec(),
+        trades,
+        params.clone(),
+        config,
+    ))
+}
+
+fn allocation(
+    equity: f64,
+    cash: f64,
+    price: f64,
+    pct: f64,
+    cost: f64,
+    long: bool,
+) -> Option<(f64, f64, f64)> {
+    if price <= 0.0 || equity <= 0.0 || pct <= 0.0 {
+        return None;
+    }
+    let mut notional = equity * pct / 100.0;
+    if long {
+        let available = if cash > 0.0 {
+            cash / (1.0 + cost)
+        } else {
+            equity / (1.0 + cost)
+        };
+        notional = notional.min(available);
+    }
+    if notional <= 0.0 {
+        return None;
+    }
+    let abs_qty = notional / price;
+    Some((
+        if long { abs_qty } else { -abs_qty },
+        notional,
+        notional * cost,
+    ))
+}
+
+fn layered_trade(
+    t: &LayeredTrade,
+    exit_ts: i64,
+    exit_price: f64,
+    exit_index: usize,
+    pnl: f64,
+    reason: TradeExit,
+    long: bool,
+) -> Trade {
+    let raw = if t.entry_price > 0.0 {
+        (exit_price - t.entry_price) / t.entry_price * 100.0
+    } else {
+        0.0
+    };
+    Trade {
+        entry_ts: t.entry_ts,
+        exit_ts,
+        entry_price: t.entry_price,
+        exit_price,
+        qty: t.qty,
+        pnl,
+        return_pct: if long { raw } else { -raw },
+        bars_held: exit_index.saturating_sub(t.entry_index),
+        adds: t.adds,
+        exit_reason: reason,
+    }
+}
+
+fn signed_return_pct_layered(t: &LayeredTrade, price: f64, long: bool) -> f64 {
+    if t.entry_price <= 0.0 {
+        return 0.0;
+    }
+    let raw = (price - t.entry_price) / t.entry_price * 100.0;
+    if long { raw } else { -raw }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LayeredOrder {
+    Enter,
+    Add,
+    Exit(TradeExit),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LayeredTrade {
+    entry_index: usize,
+    entry_ts: i64,
+    entry_price: f64,
+    qty: f64,
+    equity_at_entry: f64,
+    adds: usize,
+    stop_level: Option<f64>,
 }
 
 fn signed_return_pct(t: &OpenTrade, price: f64, long: bool) -> f64 {
@@ -582,5 +891,55 @@ exit = "close > 0"
             "exited after {} bars despite min_hold_bars = 3",
             r.trades[0].bars_held
         );
+    }
+
+    #[test]
+    fn staged_entry_commits_probe_then_confirmation_capital() {
+        let s = Strategy::parse(
+            r#"
+name = "Staged"
+entry_size_pct = 50
+add_size_pct = 50
+max_adds = 1
+[rules]
+entry = "cross_above(close, 100)"
+add = "close > 104"
+exit = "close < 0"
+"#,
+        )
+        .unwrap();
+        let mut bars = series(&[99.0, 101.0, 105.0, 110.0, 110.0]);
+        bars[2].open = 100.0;
+        bars[3].open = 105.0;
+
+        let r = run(&s, &bars, &s.defaults(), &frictionless()).unwrap();
+        assert_eq!(r.trades.len(), 1);
+        assert_eq!(r.trades[0].adds, 1);
+        let final_equity = *r.equity.last().unwrap();
+        assert!(final_equity > 105_000.0 && final_equity < 110_000.0);
+    }
+
+    #[test]
+    fn warmup_bars_compute_indicators_but_cannot_trade() {
+        let s = Strategy::parse(
+            r#"
+name = "Warm"
+[indicators]
+trend = "sma(close, 200)"
+[rules]
+entry = "close > trend"
+exit = "false"
+"#,
+        )
+        .unwrap();
+        let closes: Vec<f64> = (0..250).map(|i| 100.0 + i as f64 * 0.1).collect();
+        let bars = series(&closes);
+        let from = bars[220].ts;
+        let r =
+            run_with_benchmark_from(&s, &bars, None, &s.defaults(), &frictionless(), Some(from))
+                .unwrap();
+        assert_eq!(r.bar_count, 30);
+        assert_eq!(r.trades.len(), 1);
+        assert!(r.trades[0].entry_ts >= from);
     }
 }

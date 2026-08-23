@@ -2643,7 +2643,13 @@ impl App {
 
         let params = self.backtest.params.clone();
         let config = self.backtest.config;
-        match backtest::engine::run(strategy, &self.bars, &params, &config) {
+        match backtest::engine::run_with_benchmark(
+            strategy,
+            &self.bars,
+            Some(&self.benchmark),
+            &params,
+            &config,
+        ) {
             Ok(mut report) => {
                 // Only the app can see the cache, so the honesty about
                 // synthetic high/low is attached here rather than guessed at
@@ -2684,7 +2690,13 @@ impl App {
         }
         let config = self.backtest.config;
         let objective = self.backtest.objective;
-        match backtest::optimize::sweep(strategy, &self.bars, &config, objective) {
+        match backtest::optimize::sweep_with_benchmark(
+            strategy,
+            &self.bars,
+            Some(&self.benchmark),
+            &config,
+            objective,
+        ) {
             Ok(points) => {
                 self.status = format!("Swept {} parameter sets", points.len());
                 self.backtest.sweep = points;
@@ -2718,7 +2730,14 @@ impl App {
         };
         let config = self.backtest.config;
         let objective = self.backtest.objective;
-        match backtest::optimize::walk_forward(strategy, &self.bars, &config, objective, 4) {
+        match backtest::optimize::walk_forward_with_benchmark(
+            strategy,
+            &self.bars,
+            Some(&self.benchmark),
+            &config,
+            objective,
+            4,
+        ) {
             Ok(wf) => {
                 self.status = format!("Walk-forward: {}", wf.verdict());
                 self.backtest.walk_forward = Some(wf);
@@ -2825,14 +2844,22 @@ impl App {
         let config = self.backtest.config;
 
         let store = self.store.clone();
-        let rows = optimize::scan(&strategy, &params, symbols, &config, silent, |sym| {
-            // The selected symbol's history is already in memory; everything
-            // else comes from the cache, and a render must never fetch.
-            if sym == self.selected && !self.bars.is_empty() {
-                return Some(self.bars.clone());
-            }
-            store.bars(sym, None).ok().filter(|b| !b.is_empty())
-        });
+        let rows = optimize::scan_with_benchmark(
+            &strategy,
+            &params,
+            symbols,
+            Some(&self.benchmark),
+            &config,
+            silent,
+            |sym| {
+                // The selected symbol's history is already in memory; everything
+                // else comes from the cache, and a render must never fetch.
+                if sym == self.selected && !self.bars.is_empty() {
+                    return Some(self.bars.clone());
+                }
+                store.bars(sym, None).ok().filter(|b| !b.is_empty())
+            },
+        );
 
         self.backtest.scan_summary = optimize::summarize(&rows);
         self.status = format!(

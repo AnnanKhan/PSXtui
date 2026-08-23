@@ -49,6 +49,9 @@ pub struct Trade {
     /// Direction-adjusted, so a profitable short is positive.
     pub return_pct: f64,
     pub bars_held: usize,
+    /// Number of confirmation/add-on fills after the initial entry.
+    #[serde(default)]
+    pub adds: usize,
     pub exit_reason: TradeExit,
 }
 

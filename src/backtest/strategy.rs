@@ -123,7 +123,12 @@ impl Param {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawRules {
     entry: String,
+    /// Optional confirmation rule used to add to an existing position.
+    add: Option<String>,
     exit: Option<String>,
+    /// Optional price level. For longs it only ratchets upward; for shorts it
+    /// only ratchets downward. Breaches are acted on at the next bar's open.
+    stop: Option<String>,
     /// Blocks entry while false — a regime or liquidity gate.
     filter: Option<String>,
 }
@@ -148,6 +153,13 @@ struct RawStrategy {
     /// Bars to hold before an exit rule is allowed to fire.
     #[serde(default)]
     min_hold_bars: Option<usize>,
+    /// Percent of equity committed by the initial entry and each add-on.
+    #[serde(default)]
+    entry_size_pct: Option<f64>,
+    #[serde(default)]
+    add_size_pct: Option<f64>,
+    #[serde(default)]
+    max_adds: Option<usize>,
     #[serde(default)]
     params: BTreeMap<String, Param>,
     #[serde(default)]
@@ -166,13 +178,18 @@ pub struct Strategy {
     pub stop_loss_pct: Option<f64>,
     pub take_profit_pct: Option<f64>,
     pub min_hold_bars: usize,
+    pub entry_size_pct: f64,
+    pub add_size_pct: f64,
+    pub max_adds: usize,
     pub params: BTreeMap<String, Param>,
     /// Declared series in the order they must be computed. TOML tables do not
     /// preserve order, so this is topologically sorted at load time: an
     /// indicator may reference one declared before it.
     pub indicators: Vec<(String, Expr)>,
     pub entry: Expr,
+    pub add: Option<Expr>,
     pub exit: Option<Expr>,
+    pub stop: Option<Expr>,
     pub filter: Option<Expr>,
     /// Where the file came from, for the UI to show and for reloading.
     pub path: Option<PathBuf>,
@@ -181,7 +198,15 @@ pub struct Strategy {
 /// The names the language provides, which an indicator may therefore use
 /// without declaring.
 const BUILTIN_COLUMNS: &[&str] = &[
-    "close", "open", "high", "low", "volume", "typical", "true", "false",
+    "close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "typical",
+    "benchmark_close",
+    "true",
+    "false",
 ];
 
 impl Strategy {
@@ -232,11 +257,23 @@ impl Strategy {
 
         let entry = expr::parse(&raw.rules.entry)
             .map_err(|e| anyhow!("entry rule (`{}`): {e}", raw.rules.entry))?;
+        let add = raw
+            .rules
+            .add
+            .as_ref()
+            .map(|s| expr::parse(s).map_err(|e| anyhow!("add rule (`{s}`): {e}")))
+            .transpose()?;
         let exit = raw
             .rules
             .exit
             .as_ref()
             .map(|s| expr::parse(s).map_err(|e| anyhow!("exit rule (`{s}`): {e}")))
+            .transpose()?;
+        let stop = raw
+            .rules
+            .stop
+            .as_ref()
+            .map(|s| expr::parse(s).map_err(|e| anyhow!("stop rule (`{s}`): {e}")))
             .transpose()?;
         let filter = raw
             .rules
@@ -254,7 +291,9 @@ impl Strategy {
         for e in parsed
             .values()
             .chain([&entry])
+            .chain(add.iter())
             .chain(exit.iter())
+            .chain(stop.iter())
             .chain(filter.iter())
         {
             expr::calls(e, &mut fns);
@@ -284,7 +323,9 @@ impl Strategy {
             .collect();
         for (label, e) in [
             ("entry", Some(&entry)),
+            ("add", add.as_ref()),
             ("exit", exit.as_ref()),
+            ("stop", stop.as_ref()),
             ("filter", filter.as_ref()),
         ] {
             let Some(e) = e else { continue };
@@ -308,7 +349,28 @@ impl Strategy {
             bail!("take_profit_pct must be a positive percentage");
         }
 
-        if raw.rules.exit.is_none() && raw.stop_loss_pct.is_none() && raw.take_profit_pct.is_none()
+        let entry_size_pct = raw.entry_size_pct.unwrap_or(100.0);
+        let add_size_pct = raw.add_size_pct.unwrap_or(0.0);
+        if !entry_size_pct.is_finite()
+            || !(0.0..=100.0).contains(&entry_size_pct)
+            || entry_size_pct == 0.0
+        {
+            bail!("entry_size_pct must be greater than 0 and at most 100");
+        }
+        if !add_size_pct.is_finite() || !(0.0..=100.0).contains(&add_size_pct) {
+            bail!("add_size_pct must be between 0 and 100");
+        }
+        let max_adds = raw
+            .max_adds
+            .unwrap_or(if raw.rules.add.is_some() { 1 } else { 0 });
+        if raw.rules.add.is_some() && (add_size_pct == 0.0 || max_adds == 0) {
+            bail!("an add rule needs add_size_pct > 0 and max_adds > 0");
+        }
+
+        if raw.rules.exit.is_none()
+            && raw.rules.stop.is_none()
+            && raw.stop_loss_pct.is_none()
+            && raw.take_profit_pct.is_none()
         {
             bail!(
                 "a strategy needs an exit rule, a stop loss or a take profit — otherwise it never closes a position"
@@ -324,10 +386,15 @@ impl Strategy {
             stop_loss_pct: raw.stop_loss_pct,
             take_profit_pct: raw.take_profit_pct,
             min_hold_bars: raw.min_hold_bars.unwrap_or(0),
+            entry_size_pct,
+            add_size_pct,
+            max_adds,
             params: raw.params,
             indicators,
             entry,
+            add,
             exit,
+            stop,
             filter,
             path: None,
         })
@@ -357,8 +424,18 @@ impl Strategy {
         bars: &[Bar],
         params: &HashMap<String, f64>,
     ) -> Result<HashMap<String, Series>> {
+        self.evaluate_with_benchmark(bars, None, params)
+    }
+
+    pub fn evaluate_with_benchmark(
+        &self,
+        bars: &[Bar],
+        benchmark: Option<&[Bar]>,
+        params: &HashMap<String, f64>,
+    ) -> Result<HashMap<String, Series>> {
         let mut ctx = expr::Context::new(bars);
         ctx.params = params.clone();
+        ctx.benchmark_close = benchmark.map(|bench| align_benchmark(bars, bench));
 
         for (name, e) in &self.indicators {
             let s = expr::eval(e, &ctx).map_err(|err| anyhow!("indicator `{name}`: {err}"))?;
@@ -369,9 +446,19 @@ impl Strategy {
 
     /// Evaluate the three rule columns.
     pub fn signals(&self, bars: &[Bar], params: &HashMap<String, f64>) -> Result<Signals> {
-        let series = self.evaluate(bars, params)?;
+        self.signals_with_benchmark(bars, None, params)
+    }
+
+    pub fn signals_with_benchmark(
+        &self,
+        bars: &[Bar],
+        benchmark: Option<&[Bar]>,
+        params: &HashMap<String, f64>,
+    ) -> Result<Signals> {
+        let series = self.evaluate_with_benchmark(bars, benchmark, params)?;
         let mut ctx = expr::Context::new(bars);
         ctx.params = params.clone();
+        ctx.benchmark_close = benchmark.map(|bench| align_benchmark(bars, bench));
         ctx.series = series;
 
         let entry = expr::eval(&self.entry, &ctx).map_err(|e| anyhow!("entry rule: {e}"))?;
@@ -379,6 +466,16 @@ impl Strategy {
             .exit
             .as_ref()
             .map(|e| expr::eval(e, &ctx).map_err(|err| anyhow!("exit rule: {err}")))
+            .transpose()?;
+        let add = self
+            .add
+            .as_ref()
+            .map(|e| expr::eval(e, &ctx).map_err(|err| anyhow!("add rule: {err}")))
+            .transpose()?;
+        let stop = self
+            .stop
+            .as_ref()
+            .map(|e| expr::eval(e, &ctx).map_err(|err| anyhow!("stop rule: {err}")))
             .transpose()?;
         let filter = self
             .filter
@@ -388,7 +485,9 @@ impl Strategy {
 
         Ok(Signals {
             entry,
+            add,
             exit,
+            stop,
             filter,
             series: ctx.series,
         })
@@ -408,7 +507,9 @@ impl Strategy {
             .iter()
             .map(|(_, e)| e)
             .chain([&self.entry])
+            .chain(self.add.iter())
             .chain(self.exit.iter())
+            .chain(self.stop.iter())
             .chain(self.filter.iter())
         {
             expr::referenced_names(e, &mut names);
@@ -440,9 +541,25 @@ impl Strategy {
 /// strategy was actually looking at.
 pub struct Signals {
     pub entry: Series,
+    pub add: Option<Series>,
     pub exit: Option<Series>,
+    pub stop: Option<Series>,
     pub filter: Option<Series>,
     pub series: HashMap<String, Series>,
+}
+
+fn align_benchmark(bars: &[Bar], benchmark: &[Bar]) -> Series {
+    // Historical feeds have used different intraday timestamps for the same
+    // PSX session. The cache itself keys bars by trading day for this reason;
+    // benchmark alignment must do the same or most pre-2025 observations turn
+    // into silent `None`s despite sharing the same calendar session.
+    let by_day: HashMap<String, f64> = benchmark
+        .iter()
+        .map(|b| (crate::cache::trading_day(b.ts), b.close))
+        .collect();
+    bars.iter()
+        .map(|b| by_day.get(&crate::cache::trading_day(b.ts)).copied())
+        .collect()
 }
 
 /// Order indicator declarations so each is computed after anything it uses.

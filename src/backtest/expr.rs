@@ -309,6 +309,8 @@ pub struct Context<'a> {
     pub series: HashMap<String, Series>,
     /// Scalar `[params]` values, broadcast to every bar when referenced.
     pub params: HashMap<String, f64>,
+    /// Optional market benchmark aligned 1:1 with `bars`.
+    pub benchmark_close: Option<Series>,
 }
 
 impl<'a> Context<'a> {
@@ -317,6 +319,7 @@ impl<'a> Context<'a> {
             bars,
             series: HashMap::new(),
             params: HashMap::new(),
+            benchmark_close: None,
         }
     }
 
@@ -386,6 +389,9 @@ pub fn eval(expr: &Expr, ctx: &Context) -> Result<Series, ExprError> {
                 "high" => Ok(ctx.price(|b| b.high)),
                 "low" => Ok(ctx.price(|b| b.low)),
                 "volume" => Ok(ctx.price(|b| b.volume)),
+                "benchmark_close" => {
+                    Ok(ctx.benchmark_close.clone().unwrap_or_else(|| vec![None; n]))
+                }
                 "typical" => Ok(ctx.price(|b| b.typical())),
                 "true" => Ok(ctx.constant(TRUE)),
                 "false" => Ok(ctx.constant(FALSE)),
@@ -494,6 +500,7 @@ pub const SIGNATURES: &[(&str, usize)] = &[
     ("donchian_mid", 1),
     ("highest", 2),
     ("lowest", 2),
+    ("median", 2),
     ("change", 2),
     ("pct_change", 2),
     ("prev", 2),
@@ -658,7 +665,7 @@ fn call(name: &str, args: &[Expr], ctx: &Context) -> Result<Series, ExprError> {
             Ok(aligned(s, n))
         }
 
-        "highest" | "lowest" => {
+        "highest" | "lowest" | "median" => {
             arity(2)?;
             let p = period(&evaluated[1], name)?;
             let values = &evaluated[0];
@@ -668,15 +675,27 @@ fn call(name: &str, args: &[Expr], ctx: &Context) -> Result<Series, ExprError> {
                         return None;
                     }
                     let window = &values[i + 1 - p..=i];
-                    let mut acc: Option<f64> = None;
-                    for v in window.iter().flatten() {
-                        acc = Some(match acc {
-                            None => *v,
-                            Some(a) if name == "highest" => a.max(*v),
-                            Some(a) => a.min(*v),
+                    if name == "median" {
+                        if window.iter().any(Option::is_none) {
+                            return None;
+                        }
+                        let mut sorted: Vec<f64> = window.iter().flatten().copied().collect();
+                        sorted
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let mid = sorted.len() / 2;
+                        return Some(if sorted.len().is_multiple_of(2) {
+                            (sorted[mid - 1] + sorted[mid]) / 2.0
+                        } else {
+                            sorted[mid]
                         });
                     }
-                    acc
+                    window.iter().flatten().copied().reduce(|a, v| {
+                        if name == "highest" {
+                            a.max(v)
+                        } else {
+                            a.min(v)
+                        }
+                    })
                 })
                 .collect())
         }
@@ -922,6 +941,14 @@ mod tests {
         assert_eq!(out[1], None);
         assert_eq!(out[2], Some(5.0));
         assert_eq!(out[3], Some(5.0));
+    }
+
+    #[test]
+    fn rolling_median_handles_odd_and_even_windows() {
+        let odd = run("median(close, 3)", &[1.0, 9.0, 3.0, 5.0]);
+        assert_eq!(odd, vec![None, None, Some(3.0), Some(5.0)]);
+        let even = run("median(close, 2)", &[1.0, 9.0, 3.0]);
+        assert_eq!(even, vec![None, Some(5.0), Some(6.0)]);
     }
 
     #[test]

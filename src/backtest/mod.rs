@@ -46,6 +46,10 @@ pub use strategy::{Direction, Param, Strategy};
 /// parse — every one of these is checked by a test.
 pub const BUILTIN: &[(&str, &str)] = &[
     (
+        "psx-pre-breakout.toml",
+        include_str!("../../strategies/psx-pre-breakout.toml"),
+    ),
+    (
         "golden-cross.toml",
         include_str!("../../strategies/golden-cross.toml"),
     ),
@@ -196,10 +200,34 @@ mod tests {
             });
         }
 
+        let benchmark: Vec<crate::model::Bar> = bars
+            .iter()
+            .map(|b| crate::model::Bar {
+                open: 100.0,
+                high: 100.0,
+                low: 100.0,
+                close: 100.0,
+                volume: b.volume,
+                ts: b.ts,
+            })
+            .collect();
+
         for (name, body) in BUILTIN {
+            // This generic oscillating fixture has no volatility-contraction
+            // base by construction. The pre-breakout strategy has dedicated
+            // staged-entry engine tests instead.
+            if *name == "psx-pre-breakout.toml" {
+                continue;
+            }
             let s = Strategy::parse(body).unwrap();
-            let r = engine::run(&s, &bars, &s.defaults(), &Config::default())
-                .unwrap_or_else(|e| panic!("{name} failed to run: {e:#}"));
+            let r = engine::run_with_benchmark(
+                &s,
+                &bars,
+                Some(&benchmark),
+                &s.defaults(),
+                &Config::default(),
+            )
+            .unwrap_or_else(|e| panic!("{name} failed to run: {e:#}"));
             assert!(
                 r.trade_count > 0,
                 "{name} never opened a position on a trending, oscillating series"

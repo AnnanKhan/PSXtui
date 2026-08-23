@@ -483,6 +483,21 @@ impl Store {
         Ok((known as usize, total as usize))
     }
 
+    /// True-range coverage from a given timestamp's PSX trading day onward.
+    /// Research with a long indicator warm-up can use this to judge only bars
+    /// on which the strategy was actually eligible to trade.
+    pub fn hl_coverage_since(&self, symbol: &str, from_ts: i64) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let from_day = trading_day(from_ts);
+        let (known, total): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(hl_known), 0), COUNT(*) FROM bars
+             WHERE symbol = ?1 AND day >= ?2",
+            params![symbol, from_day],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((known as usize, total as usize))
+    }
+
     /// Every day the EOD series says traded but that has no `/historical`
     /// snapshot yet, newest first.
     ///

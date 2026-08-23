@@ -1,0 +1,69 @@
+name = "PSX Pre-Breakout"
+about = "Anticipate an upside breakout only inside a rising long-term trend: take a one-third probe in a tight, low-volatility base within a few percent of resistance, require liquid rupee turnover and strength versus KSE100, then add the remaining two-thirds only after a close through the pivot on expanding volume. A structural/ATR stop ratchets upward and a short Donchian break exits failed or exhausted moves."
+source = "Mechanised version of the trend / volatility contraction / volume dry-up / relative-strength / confirmed-breakout process documented for this PSXtui research run. The ingredients are standard technical-analysis concepts; this exact combination is original and must be judged by its out-of-sample results."
+direction = "long"
+
+# The setup is deliberately staged. The first fill is an anticipatory probe;
+# confirmation earns the rest of the allocation. Both signals fill at the next
+# session's open, so neither can trade on a close it has not seen yet.
+entry_size_pct = 33
+add_size_pct = 67
+max_adds = 1
+min_hold_bars = 1
+
+[params]
+trend_days = { default = 200, min = 200, max = 200, about = "Primary trend average" }
+mid_days = { default = 50, min = 50, max = 50, about = "Intermediate trend average" }
+slope_days = { default = 20, min = 20, max = 20, about = "Bars over which the 50-day trend must rise" }
+base_days = { default = 20, min = 15, max = 30, step = 5, about = "Lookback defining resistance and base support" }
+proximity_pct = { default = 2, min = 1, max = 3, step = 1, about = "Maximum distance below the pivot for an anticipatory entry" }
+base_range_pct = { default = 10, min = 8, max = 12, step = 2, about = "Maximum high-to-low width of the base" }
+atr_max_pct = { default = 3, min = 2.5, max = 3.5, step = 0.5, about = "Maximum ATR as a percentage of price" }
+dry_volume_mult = { default = 0.8, min = 0.6, max = 1.0, step = 0.2, about = "Five-day volume relative to the 20-day average inside the base" }
+min_turnover = { default = 20000000, min = 20000000, max = 20000000, about = "Minimum 20-day median daily rupee turnover" }
+rs_days = { default = 20, min = 20, max = 20, about = "Relative-strength lookback" }
+rs_min_pct = { default = 3, min = 0, max = 6, step = 3, about = "Minimum return advantage over KSE100" }
+breakout_buffer_atr = { default = 0.25, min = 0.25, max = 0.25, about = "Close required above the pivot, in ATR units" }
+breakout_volume_mult = { default = 1.5, min = 1.25, max = 1.75, step = 0.25, about = "Breakout volume relative to its 20-day average" }
+stop_atr = { default = 1.5, min = 1, max = 2, step = 0.5, about = "ATR distance used by the ratcheting protective stop" }
+exit_days = { default = 10, min = 5, max = 15, step = 5, about = "Donchian lookback for the trend exit" }
+
+[indicators]
+trend_ma = "sma(close, trend_days)"
+mid_ma = "sma(close, mid_days)"
+mid_rising = "pct_change(mid_ma, slope_days) > 0"
+
+# Previous-window levels prevent today's high or low from moving the goalpost.
+pivot = "prev(highest(high, base_days), 1)"
+base_low = "prev(lowest(low, base_days), 1)"
+base_width = "(pivot - base_low) / base_low * 100"
+near_pivot = "close <= pivot and close >= pivot * (1 - proximity_pct / 100)"
+
+a = "atr(14)"
+atr_pct = "a / close * 100"
+volume20 = "sma(volume, 20)"
+volume5 = "sma(volume, 5)"
+volume_dry = "volume5 <= volume20 * dry_volume_mult"
+rupee_turnover = "close * volume"
+liquid = "median(rupee_turnover, 20) >= min_turnover"
+
+stock_return = "pct_change(close, rs_days)"
+market_return = "pct_change(benchmark_close, rs_days)"
+relative_strength = "stock_return - market_return"
+
+# Avoid probes on a weak close at the bottom of the candle.
+upper_half_close = "close >= low + (high - low) * 0.5"
+base_ready = "base_width <= base_range_pct and atr_pct <= atr_max_pct and volume_dry"
+confirmed = "close > pivot + a * breakout_buffer_atr and volume >= volume20 * breakout_volume_mult"
+
+# The engine treats a [rules].stop expression as a close-based ratchet: it may
+# tighten but never widen while the position is open.
+protective_stop = "max(base_low, close - a * stop_atr)"
+trend_exit = "prev(lowest(low, exit_days), 1)"
+
+[rules]
+filter = "close > trend_ma and mid_ma > trend_ma and mid_rising and liquid and relative_strength >= rs_min_pct"
+entry = "near_pivot and base_ready and upper_half_close"
+add = "confirmed"
+stop = "protective_stop"
+exit = "close < trend_exit or close < mid_ma"

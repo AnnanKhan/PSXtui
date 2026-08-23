@@ -176,10 +176,12 @@ impl Worker {
         let store = self.store.clone();
         let asked = symbols.len();
         let rows = tokio::task::spawn_blocking(move || {
-            crate::backtest::optimize::scan(
+            let benchmark = store.bars(crate::app::BENCHMARK, None).unwrap_or_default();
+            crate::backtest::optimize::scan_with_benchmark(
                 &strategy,
                 &params,
                 &symbols,
+                Some(&benchmark),
                 &config,
                 crate::backtest::optimize::Silent::Drop,
                 |sym| store.bars(sym, None).ok().filter(|b| !b.is_empty()),

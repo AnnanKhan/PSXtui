@@ -313,11 +313,12 @@ Screen `0` runs a strategy over the full cached history — about five years and
 1,250 sessions per scrip — and shows what it would have done.
 
 Strategies are TOML files in the strategies directory
-([where things live](#where-things-live)). Nine well-known ones ship with the
+([where things live](#where-things-live)). Ten strategies ship with the
 binary and install themselves the first time you open the screen: Golden Cross,
 Connors RSI(2), Turtle breakout, MACD crossover, Bollinger reversion, absolute
 momentum, Wilder's ADX/DI system, a triple-MA ribbon, and a five-check swing
-checklist. Each file credits its source.
+checklist, plus a PSX-specific pre-breakout strategy with staged confirmation.
+Each file credits its source.
 
 ```toml
 name = "Golden Cross"
@@ -345,13 +346,14 @@ silently failing to appear.
 tweaks the selected parameter, `s` sweeps every combination, and `W` optimises
 each walk-forward window. One declaration, three uses.
 
-**Expressions.** Columns `close`, `open`, `high`, `low`, `volume`, `typical`;
+**Expressions.** Columns `close`, `open`, `high`, `low`, `volume`, `typical`,
+and date-aligned `benchmark_close` (KSE100 in the app);
 operators `+ - * /`, `> >= < <= == !=`, `and`/`or`/`not`; and the functions
 `sma(src, n) ema(src, n) rsi(src, n) atr(n) obv() cci(n) williams_r(n)
 macd(src, fast, slow, signal) macd_signal(…) macd_hist(…) bb_upper(src, n, sd)
 bb_mid(…) bb_lower(…) stoch_k(n, d) stoch_d(n, d) adx(n) di_plus(n) di_minus(n)
 donchian_upper(n) donchian_lower(n) donchian_mid(n) highest(src, n)
-lowest(src, n) change(src, n) pct_change(src, n) prev(src, n)
+lowest(src, n) median(src, n) change(src, n) pct_change(src, n) prev(src, n)
 cross_above(a, b) cross_below(a, b) abs(x) min(a, b) max(a, b) hammer()
 bullish_engulfing() morning_star()`. Everything is a whole aligned column, so an
 indicator's warm-up is `None` and a rule built on it is undefined rather than
@@ -368,7 +370,10 @@ on the bar completing the pattern. They read intraday extremes, so see
 somewhat less often, while `bullish_engulfing()` reads only open and close and
 is unaffected.
 Optional top-level keys: `direction = "short"`, `stop_loss_pct`,
-`take_profit_pct`, `min_hold_bars`, and a `filter` rule that gates entries.
+`take_profit_pct`, `min_hold_bars`, `entry_size_pct`, `add_size_pct`, and
+`max_adds`. Under `[rules]`, `filter` gates entries, `add` confirms/adds to an
+open position, and numeric `stop` is a close-based level that may tighten but
+never widen. Signals still fill at the next session's open.
 
 **Views** (`v` cycles): equity curve against buy-and-hold, the trade list,
 the parameter sweep, walk-forward folds, and a scan table.
@@ -440,6 +445,17 @@ timing. **None has passed.** The two most instructive results:
 That is the harness working. A search that produces a winner every time is
 measuring the searcher.
 
+`examples/pre_breakout_research.rs` is the pooled walk-forward harness for the
+staged PSX pre-breakout strategy. It carries 300 warm-up bars into every test
+fold while blocking all pre-fold orders, fits one parameter set across the
+liquid universe, applies default costs, rejects unadjusted corporate-action
+gaps, and reports probe-only trades separately from confirmed breakouts:
+
+```sh
+cargo run --release --example pre_breakout_research
+cargo run --release --example pre_breakout_research -- --diagnose
+```
+
 ### True intraday range
 
 PSX's long-run EOD feed carries close, volume and open — **no high or low**. A
@@ -488,7 +504,9 @@ Backtests are easy to make lie, so this one is built to argue with you.
   Sharpe above 3, which is far more often a data artefact than an edge.
 - **Walk-forward is the real answer.** The tweak panel is a curve-fitting
   machine by construction. `W` optimises on each training window and scores on
-  the untouched window after it; the efficiency ratio (out-of-sample ÷
+  the untouched window after it. Indicator history is carried into the test
+  fold, but trading is disabled until that fold begins, so a 200-day trend
+  rule does not spend the entire test warming up. The efficiency ratio (out-of-sample ÷
   in-sample) says how much of the tuning was real. Below ~0.3, none of it was.
 - **Survivorship is unfixable here.** PSX's symbol list holds currently-listed
   scrips, so anything delisted is absent and every market-wide aggregate is

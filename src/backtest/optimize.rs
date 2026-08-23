@@ -123,12 +123,23 @@ pub fn sweep(
     config: &Config,
     objective: Objective,
 ) -> Result<Vec<SweepPoint>> {
+    sweep_with_benchmark(strategy, bars, None, config, objective)
+}
+
+pub fn sweep_with_benchmark(
+    strategy: &Strategy,
+    bars: &[Bar],
+    benchmark: Option<&[Bar]>,
+    config: &Config,
+    objective: Objective,
+) -> Result<Vec<SweepPoint>> {
     let mut points = Vec::new();
 
     for params in grid(strategy) {
         // A parameter set that cannot even be evaluated (a period longer than
         // the history, say) is skipped rather than failing the whole sweep.
-        let Ok(report) = engine::run(strategy, bars, &params, config) else {
+        let Ok(report) = engine::run_with_benchmark(strategy, bars, benchmark, &params, config)
+        else {
             continue;
         };
         points.push(SweepPoint {
@@ -156,7 +167,17 @@ pub fn best_params(
     config: &Config,
     objective: Objective,
 ) -> Option<HashMap<String, f64>> {
-    sweep(strategy, bars, config, objective)
+    best_params_with_benchmark(strategy, bars, None, config, objective)
+}
+
+pub fn best_params_with_benchmark(
+    strategy: &Strategy,
+    bars: &[Bar],
+    benchmark: Option<&[Bar]>,
+    config: &Config,
+    objective: Objective,
+) -> Option<HashMap<String, f64>> {
+    sweep_with_benchmark(strategy, bars, benchmark, config, objective)
         .ok()?
         .into_iter()
         .find(|p| p.score.is_finite())
@@ -214,6 +235,9 @@ impl WalkForward {
 const MIN_TRAIN_BARS: usize = 120;
 /// Minimum bars in a test window.
 const MIN_TEST_BARS: usize = 20;
+/// Indicator history carried into each OOS fold. Trading remains disabled
+/// during these bars by `run_with_benchmark_from`.
+const WALK_FORWARD_WARMUP: usize = 300;
 
 /// Optimise on a rolling in-sample window, measure on the untouched window
 /// that follows, then roll forward and repeat.
@@ -225,6 +249,17 @@ const MIN_TEST_BARS: usize = 20;
 pub fn walk_forward(
     strategy: &Strategy,
     bars: &[Bar],
+    config: &Config,
+    objective: Objective,
+    folds_wanted: usize,
+) -> Result<WalkForward> {
+    walk_forward_with_benchmark(strategy, bars, None, config, objective, folds_wanted)
+}
+
+pub fn walk_forward_with_benchmark(
+    strategy: &Strategy,
+    bars: &[Bar],
+    benchmark: Option<&[Bar]>,
     config: &Config,
     objective: Objective,
     folds_wanted: usize,
@@ -246,19 +281,30 @@ pub fn walk_forward(
         let test_end = (test_start + test_len).min(n);
         let train = &bars[..test_start];
         let test = &bars[test_start..test_end];
+        let warmup_start = test_start.saturating_sub(WALK_FORWARD_WARMUP);
+        let test_with_warmup = &bars[warmup_start..test_end];
 
         if train.len() < MIN_TRAIN_BARS || test.len() < MIN_TEST_BARS {
             break;
         }
 
         // Optimise on training data only.
-        let Some(params) = best_params(strategy, train, config, objective) else {
+        let Some(params) =
+            best_params_with_benchmark(strategy, train, benchmark, config, objective)
+        else {
             test_start = test_end;
             continue;
         };
 
-        let is_report = engine::run(strategy, train, &params, config)?;
-        let oos_report = engine::run(strategy, test, &params, config)?;
+        let is_report = engine::run_with_benchmark(strategy, train, benchmark, &params, config)?;
+        let oos_report = engine::run_with_benchmark_from(
+            strategy,
+            test_with_warmup,
+            benchmark,
+            &params,
+            config,
+            test.first().map(|b| b.ts),
+        )?;
 
         folds.push(Fold {
             train_start_ts: train.first().map(|b| b.ts).unwrap_or(0),
@@ -332,6 +378,21 @@ pub fn scan<F>(
     symbols: &[String],
     config: &Config,
     silent: Silent,
+    bars_for: F,
+) -> Vec<ScanRow>
+where
+    F: FnMut(&str) -> Option<Vec<Bar>>,
+{
+    scan_with_benchmark(strategy, params, symbols, None, config, silent, bars_for)
+}
+
+pub fn scan_with_benchmark<F>(
+    strategy: &Strategy,
+    params: &HashMap<String, f64>,
+    symbols: &[String],
+    benchmark: Option<&[Bar]>,
+    config: &Config,
+    silent: Silent,
     mut bars_for: F,
 ) -> Vec<ScanRow>
 where
@@ -347,7 +408,7 @@ where
         if bars.len() < 60 {
             continue;
         }
-        let Ok(r) = engine::run(strategy, &bars, params, config) else {
+        let Ok(r) = engine::run_with_benchmark(strategy, &bars, benchmark, params, config) else {
             continue;
         };
         if r.trade_count == 0 && silent == Silent::Drop {

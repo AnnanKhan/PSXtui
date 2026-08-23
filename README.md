@@ -1,27 +1,62 @@
+<div align="center">
+
 # PSXTUI
 
-A terminal client for **Pakistan Stock Exchange** market data — live quotes, a
-full-market screener, candlestick charts with technical indicators, risk and
-return analytics, company fundamentals, and intraday microstructure.
+**The Pakistan Stock Exchange, inside your terminal.**
 
-![The dashboard: breadth, gainers, losers, most active and a sector heatmap](docs/dashboard.png)
+Live market data, technical charts, fundamentals, portfolio comparisons, and
+honest strategy research in one fast keyboard-driven interface.
+
+[![CI](https://github.com/AnnanKhan/PSXtui/actions/workflows/ci.yml/badge.svg)](https://github.com/AnnanKhan/PSXtui/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/AnnanKhan/PSXtui?display_name=tag&sort=semver)](https://github.com/AnnanKhan/PSXtui/releases)
+[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-dea584?logo=rust)](https://www.rust-lang.org/)
+[![Linux, macOS, Windows](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-4c566a)](#install)
+
+[Install](#install) · [Screens](#screens) · [Keys](#keys) · [Backtesting](#backtesting) · [Data](#how-it-gets-data) · [Development](#development)
+
+</div>
+
+![PSXTUI dashboard showing market breadth, gainers, losers, active scrips, and a sector heatmap](docs/dashboard.png)
+
+## Why PSXTUI?
+
+| Explore the market | Research a scrip | Test an idea |
+|:-------------------|:-----------------|:-------------|
+| Screen every PSX listing, follow market breadth, and inspect sector activity. | Study price action, indicators, fundamentals, seasonality, risk, and macro correlations. | Write strategies in TOML, sweep parameters, scan the market, and validate with walk-forward tests. |
+
+- **No API key or account.** Data comes from public PSX sources and is cached locally.
+- **Built for the terminal.** Keyboard and mouse controls, seven themes, and high-resolution charts in supported terminals.
+- **Bias-aware backtesting.** Next-bar fills, default trading costs, warm-up handling, and explicit data-quality warnings.
+
+## Quick start
+
+```sh
+git clone https://github.com/AnnanKhan/PSXtui.git
+cd PSXtui
+./install.sh
+psxtui
+```
+
+On Windows, run `.\install.ps1` from PowerShell instead. It downloads the
+prebuilt binary, so Rust and Visual Studio are not required. See
+[Install](#install) for platform details, manual builds, updates, and uninstalling.
 
 ## Screens
 
-| # | Screen | What it shows |
-|---|--------|---------------|
-| 1 | **Dashboard** | Market breadth, top gainers/losers, most active by value, scrollable sector heatmap |
-| 2 | **Screener** | Every listed scrip — sortable and filterable by symbol, name or sector, plus valuation columns |
-| 3 | **Chart** | Candlesticks with SMA/EMA/Bollinger/Donchian/Ichimoku, and a Volume / RSI / MACD / ATR / Stochastic / ADX / CCI / Williams %R pane |
-| 4 | **Analysis** | Returns by window, annualized return & volatility, Sharpe, Sortino, max drawdown, beta and correlation vs KSE100 |
-| 5 | **Company** | Business profile, key people, equity structure, annual & quarterly financials, ratios, announcements |
-| 6 | **Intraday** | Session price with VWAP, 15-minute volume distribution, live trade tape |
-| 7 | **Compare** | 2-8 scrips side by side — rebased performance overlay, risk table, correlation matrix |
-| 8 | **Seasonality** | Month-by-year return grid, day-of-week effects, return distribution, streaks |
-| 9 | **Macro** | 20 external series — energy, metals, agriculture, freight, FX, crypto — plus the SBP policy rate and business news, with correlation to the selected scrip |
-| 0 | **Backtest** | Run a strategy over five years of history — equity curve against buy-and-hold, trade list, parameter sweep, walk-forward validation and a market-wide scan |
+| Key | Screen | What it shows |
+|:---:|--------|---------------|
+| `1` | **Dashboard** | Market breadth, gainers and losers, active scrips, and a sector heatmap |
+| `2` | **Screener** | Every listed scrip, sortable and filterable by symbol, company, or sector |
+| `3` | **Chart** | Candlesticks, trend overlays, and nine switchable indicator panes |
+| `4` | **Analysis** | Returns, volatility, Sharpe, Sortino, drawdown, beta, and KSE100 correlation |
+| `5` | **Company** | Profile, key people, equity structure, financials, ratios, and announcements |
+| `6` | **Intraday** | Session price, VWAP, 15-minute volume distribution, and the live trade tape |
+| `7` | **Compare** | Two to eight scrips with rebased performance, risk, and correlations |
+| `8` | **Seasonality** | Monthly and weekday effects, return distribution, and streaks |
+| `9` | **Macro** | Commodities, freight, FX, crypto, policy rate, news, and scrip correlations |
+| `0` | **Backtest** | Equity curve, trades, parameter sweep, walk-forward validation, and market scans |
 
-Timeframes: 5D, 1M, 3M, 6M, YTD, 1Y, 2Y, 3Y, 5Y and MAX.
+Available timeframes: `5D` · `1M` · `3M` · `6M` · `YTD` · `1Y` · `2Y` · `3Y` · `5Y` · `MAX`
 
 The bottom-right status bar shows the regular PSX equity session: a green
 `● OPEN` during trading and a red `● CLOSED` outside it. It follows the
@@ -31,14 +66,18 @@ are not inferred from the clock, so the indicator is a session-hours signal
 rather than a live holiday calendar.
 
 <table>
-<tr><td width="50%"><a href="docs/chart.png"><img src="docs/chart.png" alt="Chart"></a><br><b>Chart</b> — candles, SMA/EMA overlays, volume pane</td>
-<td width="50%"><a href="docs/compare-full.png"><img src="docs/compare-full.png" alt="Compare"></a><br><b>Compare</b> — up to eight scrips rebased, with risk and correlations</td></tr>
-<tr><td><a href="docs/screener.png"><img src="docs/screener.png" alt="Screener"></a><br><b>Screener</b> — every listed scrip, sortable</td>
-<td><a href="docs/macro.png"><img src="docs/macro.png" alt="Macro"></a><br><b>Macro</b> — commodities, FX, policy rate, headlines</td></tr>
+  <tr>
+    <td width="50%" align="center"><a href="docs/chart.png"><img src="docs/chart.png" alt="Chart screen"></a><br><strong>Chart</strong><br><sub>Candles, overlays, and indicator panes</sub></td>
+    <td width="50%" align="center"><a href="docs/compare-full.png"><img src="docs/compare-full.png" alt="Compare screen"></a><br><strong>Compare</strong><br><sub>Rebased performance, risk, and correlations</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><a href="docs/screener.png"><img src="docs/screener.png" alt="Screener screen"></a><br><strong>Screener</strong><br><sub>The full PSX market in one sortable table</sub></td>
+    <td width="50%" align="center"><a href="docs/macro.png"><img src="docs/macro.png" alt="Macro screen"></a><br><strong>Macro</strong><br><sub>Commodities, FX, policy rate, and headlines</sub></td>
+  </tr>
 </table>
 
 <details>
-<summary>The other five screens</summary>
+<summary><strong>See the remaining screens</strong></summary>
 
 | | |
 |---|---|
@@ -51,11 +90,8 @@ rather than a live holiday calendar.
 
 </details>
 
-Every screenshot is a photograph of a real session in the `midnight` theme, with
-charts drawn as bitmaps through the terminal graphics protocol —
-[`docs/capture.sh`](docs/capture.sh) takes them, so they are reproducible rather
-than curated.
-
+Every screenshot comes from a real session in the `midnight` theme.
+[`docs/capture.sh`](docs/capture.sh) reproduces the gallery from the running app.
 
 ## Install
 
@@ -588,7 +624,7 @@ src/
               gfx.rs    rasteriser + kitty graphics protocol; braille elsewhere
 ```
 
-Two invariants the code depends on:
+Three invariants the code depends on:
 
 1. **Indicator alignment.** Every indicator returns a `Vec<Option<f64>>` the
    same length as its input, with `None` for the warm-up window — so overlays
